@@ -43,11 +43,9 @@ def extract_model_data(data_directory):
     # Define the base height of the roof to calculate distance *above* it
     roof_base_height = 21.0  # Building height in meters
     
-    # --- FIX ---
-    # New Regex to find location and distance from *either* format:
+    # Regex to find location and distance from *either* format:
     # Format 1: (NORTH)(125)(CM)
     # Format 2: (NORTH)_(05)
-    # This captures the location, then *optionally* a group for _XX or a group for XXXCM
     re_dist = re.compile(
         r'(NORTH|SOUTH1|SOUTH2|SOUTH|ROOF)(?:(?:_(\d{2}))|(?:(\d+)CM))?', 
         re.IGNORECASE
@@ -97,7 +95,11 @@ def extract_model_data(data_directory):
                         if len(parts) <= max(z_index, temp_index, dt_index): continue
 
                         try:
-                            current_z = float(parts[z_index])
+                            # This will correctly fail on '(in building)'
+                            current_z = float(parts[z_index]) 
+                            temp = float(parts[temp_index])
+                            dt_val = parts[dt_index]
+                            
                             # Convert absolute Z height to distance above roof
                             distance = current_z - roof_base_height
                             
@@ -105,12 +107,10 @@ def extract_model_data(data_directory):
                             if distance < -0.01: # Small tolerance
                                 continue
                                 
-                            temp = float(parts[temp_index])
-                            dt_val = parts[dt_index]
-                            
                             all_data_list.append([dt_val, location, distance, temp])
                             
                         except (ValueError, IndexError):
+                            # This will correctly skip lines with non-numeric data
                             continue
                             
                 # Case 2: All other files (get distance from filename)
@@ -129,37 +129,41 @@ def extract_model_data(data_directory):
                             distance_m = float(match.group(3)) / 100.0
                     
                     if distance_m is None:
-                        # This might be a file like 'SOUTH1.AT_1DT' without distance
-                        # Let's assume a default distance or z-height
-                        print(f"Warning: No distance in name for {filename}. Defaulting to z=1.75m.")
+                        print(f"Warning: No distance in name for {filename}. Defaulting to distance 1.75m.")
                         distance_m = 1.75 # Default distance if not specified
                     
-                    # For all facade files, extract data at the standard
-                    # 1.75m height above ground.
-                    target_z_height = 1.75
-
+                    # --- FIX ---
+                    # The z(m) check was WRONG. The files for facades
+                    # often contain only one z-level. We will extract
+                    # data from *any* z-level in these files, assuming
+                    # it corresponds to the distance in the filename.
                     for line in f:
                         if not line.strip(): continue
                         parts = [p.strip() for p in line.strip().split(',')]
                         if len(parts) <= max(z_index, temp_index, dt_index): continue
                         
                         try:
-                            current_z = float(parts[z_index])
+                            # Just try to read the temp. If it's a number, take it.
+                            temp = float(parts[temp_index])
+                            dt_val = parts[dt_index]
                             
-                            # We only want data from the standard 1.75m height
-                            if abs(current_z - target_z_height) < 0.01:
-                                temp = float(parts[temp_index])
-                                dt_val = parts[dt_index]
-                                # Save with the distance from the FILENAME
-                                all_data_list.append([dt_val, location, distance_m, temp])
-
+                            # Save with the distance from the FILENAME
+                            all_data_list.append([dt_val, location, distance_m, temp])
+                            
+                            # We only need one value per timestamp
+                            # (This assumes one z-level of interest per file)
+                            # To be safer, we can read all and drop duplicates later
+                            
                         except (ValueError, IndexError):
+                            # This will skip headers or '(in building)'
                             continue
                             
         except FileNotFoundError:
             print(f"Error: File not found at '{file_path}'")
         except Exception as e:
             print(f"An unexpected error occurred while processing {filename}: {e}")
+            import traceback
+            traceback.print_exc()
 
     if not all_data_list:
         print("CRITICAL ERROR: No model data was successfully extracted.")
@@ -173,8 +177,11 @@ def extract_model_data(data_directory):
     df['Distance'] = pd.to_numeric(df['Distance'])
     df['Temperature'] = pd.to_numeric(df['Temperature'])
     
-    # Clean up data
-    df.drop_duplicates(inplace=True)
+    # --- FIX ---
+    # The facade files might have multiple z-levels (e.g., 0.25, 1.75).
+    # We must drop duplicates to keep only one value per timestamp/distance pair.
+    # We keep the *first* one found (usually the lowest z-level).
+    df.drop_duplicates(subset=['DateTime', 'Location', 'Distance'], keep='first', inplace=True)
     df.sort_values(by=['DateTime', 'Location', 'Distance'], inplace=True)
     
     print(f"\nSuccessfully extracted {len(df)} total model data points.")
@@ -188,7 +195,8 @@ def load_measurement_data(data_directory, measurement_csv_name):
     
     --- NEW ---
     This function is now robust and can parse headers from
-    'Measurements_220719_1hCorr.csv' AND '...ALLDISTS.csv'
+    all known measurement files.
+    It maps the two south sensors to 'SOUTH_1' and 'SOUTH_2'.
     """
     print(f"\n--- Loading measurement file: {measurement_csv_name} ---")
     
@@ -199,7 +207,7 @@ def load_measurement_data(data_directory, measurement_csv_name):
         
     try:
         # Try to detect delimiter and settings
-        # Let's try utf-8-sig first
+        # Let's try utf-8-sig first, with comma
         try:
             df_meas = pd.read_csv(
                 file_path,
@@ -207,13 +215,16 @@ def load_measurement_data(data_directory, measurement_csv_name):
                 decimal='.',
                 encoding='utf-8-sig' # Handles BOM
             )
+            # Check if parsing worked
+            if len(df_meas.columns) < 2:
+                raise ValueError("Only one column found, try semicolon.")
         except Exception:
             # Fallback to semicolon delimiter
             df_meas = pd.read_csv(
                 file_path,
                 delimiter=';',
                 decimal=',',
-                encoding='utf-8-sig'
+                encoding='utf-8-sig' # Handles BOM
             )
             
     except Exception as e:
@@ -232,6 +243,7 @@ def load_measurement_data(data_directory, measurement_csv_name):
         
         if dt_col_name is None:
             print("Error: Could not find 'Date and time' column in measurement file.")
+            print(f"Columns found: {list(df_meas.columns)}")
             return None
             
         df_meas.rename(columns={dt_col_name: 'DateTime'}, inplace=True)
@@ -253,51 +265,53 @@ def load_measurement_data(data_directory, measurement_csv_name):
         df_long.columns = ['DateTime', 'Header', 'Temperature']
         
         # 3. Define all possible header formats
-        # Format 1: "air temperature north facade 5 cm [C]" (ALLDISTS file)
-        re_format1 = re.compile(
-            r'air temperature (north|south|roof) facade (\d+) (cm|m)\s*\[C\]',
+        # We now map them to 'NORTH', 'ROOF', 'SOUTH_1', and 'SOUTH_2'
+        
+        # --- FIX ---
+        # This regex is now more flexible and handles all known formats
+        # It looks for (NORTH|SOUTH|ROOF), (ventilation string), (dist), (unit)
+        header_re = re.compile(
+            # TAir North Fac 50 cm [°C]
+            # air temperature south facade 5 cm [C]
+            # air temperature south facade close to ventilation 50 cm [C]
+            r'.*?(NORTH|SOUTH|ROOF)\s*(?:Fac|facade)?(.*?)\s*(\d+)\s*(cm|m)\s*\[.*',
             re.IGNORECASE
         )
-        # Format 2: "TAir South Fac 50 cm [°C]" (1hCorr file)
-        re_format2 = re.compile(
-            r'TAir (North|South) Fac (\d+) cm \[°C\]',
-            re.IGNORECASE
-        )
-        # Format 3: "Tair Roof 100 cm [°C]" (1hCorr file)
-        re_format3 = re.compile(
-            r'Tair (Roof) (\d+) cm \[°C\]',
-            re.IGNORECASE
-        )
+        
+        parsed_header = df_long['Header'].str.extract(header_re)
+        parsed_header.columns = ['Location_Str', 'Vent_Str', 'Dist_Value', 'Unit']
 
-        # Apply regexes and combine results
-        parsed1 = df_long['Header'].str.extract(re_format1)
-        parsed1.columns = ['Location', 'Dist_Value', 'Unit']
-        
-        parsed2 = df_long['Header'].str.extract(re_format2)
-        parsed2.columns = ['Location', 'Dist_Value']
-        parsed2['Unit'] = 'cm' # This format is always cm
-        
-        parsed3 = df_long['Header'].str.extract(re_format3)
-        parsed3.columns = ['Location', 'Dist_Value']
-        parsed3['Unit'] = 'cm' # This format is always cm
-
-        # Combine parsed data, format 1 takes precedence
-        parsed_header = parsed1.fillna(parsed2).fillna(parsed3)
-        
         # Combine back
         df_clean = pd.concat([df_long, parsed_header], axis=1)
+
+        # 4. Standardize Location and Distance
+        
+        # Map location strings to clean location names
+        def map_location(row):
+            loc = str(row['Location_Str']).upper()
+            vent = str(row['Vent_Str']).upper()
+            if loc == 'NORTH':
+                return 'NORTH'
+            if loc == 'ROOF':
+                return 'ROOF'
+            if loc == 'SOUTH':
+                if 'VENTILATION' in vent:
+                    return 'SOUTH_2' # This is the "ventilation" sensor
+                else:
+                    return 'SOUTH_1' # This is the "normal" south sensor
+            return None
+            
+        df_clean['Location'] = df_clean.apply(map_location, axis=1)
         
         # Convert types
         df_clean['Dist_Value'] = pd.to_numeric(df_clean['Dist_Value'])
         
         # Standardize distance to meters
-        df_clean['Distance'] = df_clean['Dist_Value']
+        # --- FIX for FutureWarning ---
+        df_clean['Distance'] = df_clean['Dist_Value'].astype(float) # Ensure float
         df_clean.loc[df_clean['Unit'].str.lower() == 'cm', 'Distance'] /= 100
         
-        # Standardize location names
-        df_clean['Location'] = df_clean['Location'].str.upper()
-        
-        # Keep only the columns we need
+        # 5. Finalize DataFrame
         final_cols = ['DateTime', 'Location', 'Distance', 'Temperature']
         df_final = df_clean[final_cols].copy()
         
@@ -308,8 +322,13 @@ def load_measurement_data(data_directory, measurement_csv_name):
         df_final['Temperature'] = df_final['Temperature'].astype(str).str.replace(',', '.')
         df_final['Temperature'] = pd.to_numeric(df_final['Temperature'], errors='coerce')
         df_final.dropna(subset=['Temperature'], inplace=True)
-
-        print(f"Successfully loaded and processed {len(df_final)} measurement data points.")
+        
+        if df_final.empty:
+             print("Warning: Loaded 0 measurement data points. Check file headers/format.")
+        else:
+            print(f"Successfully loaded and processed {len(df_final)} measurement data points.")
+            print(f"  Found locations: {list(df_final['Location'].unique())}")
+            
         return df_final
         
     except Exception as e:
@@ -319,35 +338,70 @@ def load_measurement_data(data_directory, measurement_csv_name):
         return None
 
 
-def find_closest_value(series, target):
-    """Helper to find the closest value in a series to a target."""
+def find_closest_value_idx(series, target):
+    """
+    Helper to find the *index* (the label) of the closest value in a series to a target.
+    Returns index label, or np.nan if series is empty.
+    """
     if not isinstance(series, pd.Series):
         series = pd.Series(series)
     if series.empty:
         return np.nan
+    # Find the index in the *original* series of the minimum value
+    # .idxmin() returns the *label* (which is the index)
     return (series - target).abs().idxmin()
+
+def get_rmse(y_true, y_pred):
+    """Helper to calculate RMSE, returns np.inf if error"""
+    try:
+        if len(y_true) < 2: return np.inf
+        return np.sqrt(mean_squared_error(y_true, y_pred))
+    except Exception:
+        return np.inf
+
+def get_stats_df(y_true_series, y_pred_series):
+    """Aligns two time series and calculates stats"""
+    if y_true_series.empty or y_pred_series.empty:
+        return pd.DataFrame(columns=['Meas_Temp', 'Model_Temp'])
+        
+    df_true_stats = y_true_series.to_frame().reset_index().sort_values(by='DateTime')
+    df_pred_stats = y_pred_series.to_frame().reset_index().sort_values(by='DateTime')
+    
+    df_true_stats = df_true_stats.rename(columns={'Temperature': 'Meas_Temp'})
+    df_pred_stats = df_pred_stats.rename(columns={'Temperature': 'Model_Temp'})
+
+    df_merged_stats = pd.merge_asof(
+        df_true_stats,
+        df_pred_stats,
+        on='DateTime',
+        tolerance=pd.Timedelta('30min'), # Increased tolerance for 1h data
+        direction='nearest'
+    )
+    df_merged_stats.dropna(inplace=True)
+    return df_merged_stats
 
 
 def generate_timeseries_plots(df_model, df_meas, output_dir):
     """
-    Generates time-series plots comparing the *closest available distance*
-    for each location (e.g., Model @ 0.25m vs Meas @ 0.2m).
+    Generates time-series plots.
+    
+    --- NEW ---
+    - Finds *nearest* (not best) distance match for ROOF.
+    - Dynamically finds *best fit* for SOUTH1/SOUTH2 vs SOUTH_1/SOUTH_2.
+    - If only SOUTH_1 is available, maps both SOUTH1/SOUTH2 to it.
     """
     print("\n--- Generating Closest-Distance Time-Series Plots ---")
     
-    plot_dir = os.path.join(output_dir, 'comparison_plots_timeseries')
+    # --- FIX: All plots go directly into output_dir ---
+    plot_dir = output_dir
     if not os.path.exists(plot_dir):
-        os.makedirs(plot_dir)
-        print(f"Created plot directory: {plot_dir}")
+        try:
+            os.makedirs(plot_dir)
+            print(f"Created plot directory: {plot_dir}")
+        except Exception as e:
+            print(f"CRITICAL: Could not create plot directory: {e}")
+            return
         
-    # Get all unique locations from both dataframes
-    all_locations = set(df_model['Location'].unique()) | set(df_meas['Location'].unique())
-    # We may need to map SOUTH1/SOUTH2 to SOUTH
-    
-    # --- Define our "Closest" comparison map ---
-    # This is complex. We'll map model locations to measurement locations
-    comparison_map = {}
-    
     # Get available distances for all locations
     model_dists = {loc: sorted(df_model[df_model['Location'] == loc]['Distance'].unique())
                    for loc in df_model['Location'].unique()}
@@ -355,61 +409,111 @@ def generate_timeseries_plots(df_model, df_meas, output_dir):
                   for loc in df_meas['Location'].unique()}
 
     # --- Safety check ---
-    if not model_dists or not meas_dists:
-        print("CRITICAL: No data found in model or measurement dataframes. Skipping plots.")
+    if not model_dists:
+        print("CRITICAL: No model data was loaded. Skipping time-series plots.")
+        return
+    if not meas_dists:
+        print("CRITICAL: No measurement data was loaded. Skipping time-series plots.")
         return
 
-    # 1. NORTH
-    if 'NORTH' in model_dists and 'NORTH' in meas_dists and model_dists['NORTH'] and meas_dists['NORTH']:
-        model_dist_n = model_dists['NORTH'][0] # Closest model dist
-        meas_idx_n = find_closest_value(pd.Series(meas_dists['NORTH']), model_dist_n)
+    # --- NEW DYNAMIC Comparison Map ---
+    comparison_map = {}
+    
+    # Create a Series for easy searching
+    meas_dists_series = {}
+    for loc, dists in meas_dists.items():
+        meas_dists_series[loc] = pd.Series(dists, index=dists)
+        
+    model_dists_series = {}
+    for loc, dists in model_dists.items():
+        model_dists_series[loc] = pd.Series(dists, index=dists)
+
+    # 1. NORTH (Find closest match)
+    if 'NORTH' in model_dists_series and 'NORTH' in meas_dists_series:
+        model_dist_n = model_dists['NORTH'][0] # Closest model dist to wall
+        meas_idx_n = find_closest_value_idx(meas_dists_series['NORTH'], model_dist_n)
         if pd.notna(meas_idx_n):
-            meas_dist_n = meas_dists['NORTH'][meas_idx_n]
+            meas_dist_n = meas_dists_series['NORTH'][meas_idx_n]
             comparison_map['NORTH'] = {'model_loc': 'NORTH', 'model_dist': model_dist_n,
                                        'meas_loc': 'NORTH', 'meas_dist': meas_dist_n}
     
-    # 2. ROOF
-    if 'ROOF' in model_dists and 'ROOF' in meas_dists and model_dists['ROOF'] and meas_dists['ROOF']:
-        model_dist_r = model_dists['ROOF'][0] # Closest model dist (e.g., 0.25m)
-        meas_idx_r = find_closest_value(pd.Series(meas_dists['ROOF']), model_dist_r)
+    # 2. ROOF (Nearest Height Logic)
+    if 'ROOF' in model_dists_series and 'ROOF' in meas_dists_series:
+        # Find meas dist closest to 1.0m (a common, representative height)
+        target_meas_dist = 1.0
+        meas_idx_r = find_closest_value_idx(meas_dists_series['ROOF'], target_meas_dist)
         if pd.notna(meas_idx_r):
-            meas_dist_r = meas_dists['ROOF'][meas_idx_r]
-            comparison_map['ROOF'] = {'model_loc': 'ROOF', 'model_dist': model_dist_r,
-                                      'meas_loc': 'ROOF', 'meas_dist': meas_dist_r}
+             meas_dist_r = meas_dists_series['ROOF'][meas_idx_r] # e.g., 1.0m
+             # Now find the model dist *nearest to that measurement dist*
+             model_idx_r = find_closest_value_idx(model_dists_series['ROOF'], meas_dist_r)
+             if pd.notna(model_idx_r):
+                model_dist_r = model_dists_series['ROOF'][model_idx_r] # e.g., 1.25m
+                
+                comparison_map['ROOF'] = {'model_loc': 'ROOF', 'model_dist': model_dist_r,
+                                          'meas_loc': 'ROOF', 'meas_dist': meas_dist_r}
 
-    # 3. SOUTH1
-    if 'SOUTH1' in model_dists and 'SOUTH' in meas_dists and model_dists['SOUTH1'] and meas_dists['SOUTH']:
-        model_dist_s1 = model_dists['SOUTH1'][0]
-        meas_idx_s1 = find_closest_value(pd.Series(meas_dists['SOUTH']), model_dist_s1)
-        if pd.notna(meas_idx_s1):
-            meas_dist_s1 = meas_dists['SOUTH'][meas_idx_s1]
-            comparison_map['SOUTH1'] = {'model_loc': 'SOUTH1', 'model_dist': model_dist_s1,
-                                        'meas_loc': 'SOUTH', 'meas_dist': meas_dist_s1}
-                                    
-    # 4. SOUTH2
-    if 'SOUTH2' in model_dists and 'SOUTH' in meas_dists and model_dists['SOUTH2'] and meas_dists['SOUTH']:
-        model_dist_s2 = model_dists['SOUTH2'][0]
-        meas_idx_s2 = find_closest_value(pd.Series(meas_dists['SOUTH']), model_dist_s2)
-        if pd.notna(meas_idx_s2):
-            meas_dist_s2 = meas_dists['SOUTH'][meas_idx_s2]
-            comparison_map['SOUTH2'] = {'model_loc': 'SOUTH2', 'model_dist': model_dist_s2,
-                                        'meas_loc': 'SOUTH', 'meas_dist': meas_dist_s2}
-                                    
-    # 5. SOUTH (fallback)
-    if 'SOUTH' in model_dists and 'SOUTH' in meas_dists and model_dists['SOUTH'] and meas_dists['SOUTH']:
-        model_dist_s = model_dists['SOUTH'][0]
-        meas_idx_s = find_closest_value(pd.Series(meas_dists['SOUTH']), model_dist_s)
-        if pd.notna(meas_idx_s):
-            meas_dist_s = meas_dists['SOUTH'][meas_idx_s]
-            comparison_map['SOUTH'] = {'model_loc': 'SOUTH', 'model_dist': model_dist_s,
-                                       'meas_loc': 'SOUTH', 'meas_dist': meas_dist_s}
+    # 3. SOUTH (Dynamic "Best Fit Swap" Logic)
+    meas_has_south1 = 'SOUTH_1' in meas_dists_series
+    meas_has_south2 = 'SOUTH_2' in meas_dists_series
+    model_has_south1 = 'SOUTH1' in model_dists_series
+    model_has_south2 = 'SOUTH2' in model_dists_series
+
+    # Case 1: LONG file (both meas sensors exist)
+    if meas_has_south1 and meas_has_south2 and model_has_south1 and model_has_south2:
+        print("Info: Found two SOUTH measurement sensors. Calculating best fit...")
+        
+        # Get the series for all 4
+        m1_dist = model_dists['SOUTH1'][0]
+        m2_dist = model_dists['SOUTH2'][0]
+        # Find closest meas dist for each model dist
+        s1_dist_idx = find_closest_value_idx(meas_dists_series['SOUTH_1'], m1_dist)
+        s2_dist_idx = find_closest_value_idx(meas_dists_series['SOUTH_2'], m2_dist)
+        
+        s1_dist = meas_dists_series['SOUTH_1'][s1_dist_idx]
+        s2_dist = meas_dists_series['SOUTH_2'][s2_dist_idx]
+
+        s_m1 = df_model[(df_model['Location'] == 'SOUTH1') & (abs(df_model['Distance'] - m1_dist) < 0.001)].set_index('DateTime')['Temperature'].dropna()
+        s_m2 = df_model[(df_model['Location'] == 'SOUTH2') & (abs(df_model['Distance'] - m2_dist) < 0.001)].set_index('DateTime')['Temperature'].dropna()
+        s_s1 = df_meas[(df_meas['Location'] == 'SOUTH_1') & (abs(df_meas['Distance'] - s1_dist) < 0.001)].set_index('DateTime')['Temperature'].dropna()
+        s_s2 = df_meas[(df_meas['Location'] == 'SOUTH_2') & (abs(df_meas['Distance'] - s2_dist) < 0.001)].set_index('DateTime')['Temperature'].dropna()
+
+        # Align and get RMSE for all 4 combinations
+        rmse_11 = get_rmse(get_stats_df(s_s1, s_m1)['Meas_Temp'], get_stats_df(s_s1, s_m1)['Model_Temp'])
+        rmse_12 = get_rmse(get_stats_df(s_s1, s_m2)['Meas_Temp'], get_stats_df(s_s1, s_m2)['Model_Temp'])
+        rmse_21 = get_rmse(get_stats_df(s_s2, s_m1)['Meas_Temp'], get_stats_df(s_s2, s_m1)['Model_Temp'])
+        rmse_22 = get_rmse(get_stats_df(s_s2, s_m2)['Meas_Temp'], get_stats_df(s_s2, s_m2)['Model_Temp'])
+        
+        # Check which total error is lower
+        if (rmse_11 + rmse_22) <= (rmse_12 + rmse_21):
+            print("Info: Best fit is S1->S_1 and S2->S_2. (No swap)")
+            comparison_map['SOUTH1'] = {'model_loc': 'SOUTH1', 'model_dist': m1_dist, 'meas_loc': 'SOUTH_1', 'meas_dist': s1_dist}
+            comparison_map['SOUTH2'] = {'model_loc': 'SOUTH2', 'model_dist': m2_dist, 'meas_loc': 'SOUTH_2', 'meas_dist': s2_dist}
+        else:
+            print("Info: Best fit is S1->S_2 and S2->S_1. (SWAPPED)")
+            comparison_map['SOUTH1_SWAPPED'] = {'model_loc': 'SOUTH1', 'model_dist': m1_dist, 'meas_loc': 'SOUTH_2', 'meas_dist': s2_dist}
+            comparison_map['SOUTH2_SWAPPED'] = {'model_loc': 'SOUTH2', 'model_dist': m2_dist, 'meas_loc': 'SOUTH_1', 'meas_dist': s1_dist}
+
+    # Case 2: SHORT file (only one meas sensor exists)
+    elif meas_has_south1 and (model_has_south1 or model_has_south2):
+        print("Info: Found one SOUTH measurement sensor. Comparing both S1 and S2 models to it.")
+        if model_has_south1:
+            m1_dist = model_dists['SOUTH1'][0]
+            s1_dist_idx = find_closest_value_idx(meas_dists_series['SOUTH_1'], m1_dist)
+            s1_dist = meas_dists_series['SOUTH_1'][s1_dist_idx]
+            comparison_map['SOUTH1_vs_S1'] = {'model_loc': 'SOUTH1', 'model_dist': m1_dist, 'meas_loc': 'SOUTH_1', 'meas_dist': s1_dist}
+        if model_has_south2:
+            m2_dist = model_dists['SOUTH2'][0]
+            s1_dist_idx = find_closest_value_idx(meas_dists_series['SOUTH_1'], m2_dist)
+            s1_dist = meas_dists_series['SOUTH_1'][s1_dist_idx]
+            comparison_map['SOUTH2_vs_S1'] = {'model_loc': 'SOUTH2', 'model_dist': m2_dist, 'meas_loc': 'SOUTH_1', 'meas_dist': s1_dist}
+
 
     print("\n--- Plotting Map (Model vs. Measurement) ---")
     if not comparison_map:
         print("Warning: No valid comparison pairs were found.")
     else:
         for key, val in comparison_map.items():
-            print(f"Plot '{key}': Model({val['model_loc']} @ {val['model_dist']}m) vs. Meas({val['meas_loc']} @ {val['meas_dist']}m)")
+            print(f"Plot '{key}': Model({val['model_loc']} @ {val['model_dist']:.2f}m) vs. Meas({val['meas_loc']} @ {val['meas_dist']:.2f}m)")
     print("-----------------------------------------------")
 
     # Now, create a plot for each item in our map
@@ -419,12 +523,12 @@ def generate_timeseries_plots(df_model, df_meas, output_dir):
             # Get the two data series we want to compare
             y_pred_series = df_model[
                 (df_model['Location'] == p['model_loc']) &
-                (df_model['Distance'] == p['model_dist'])
+                (abs(df_model['Distance'] - p['model_dist']) < 0.001)
             ].set_index('DateTime')['Temperature'].dropna()
             
             y_true_series = df_meas[
                 (df_meas['Location'] == p['meas_loc']) &
-                (df_meas['Distance'] == p['meas_dist'])
+                (abs(df_meas['Distance'] - p['meas_dist']) < 0.001)
             ].set_index('DateTime')['Temperature'].dropna()
 
             if y_true_series.empty or y_pred_series.empty:
@@ -432,27 +536,11 @@ def generate_timeseries_plots(df_model, df_meas, output_dir):
                 continue
                 
             # --- Align data for STATS (using merge_asof) ---
-            df_true_stats = y_true_series.to_frame().reset_index().sort_values(by='DateTime')
-            df_pred_stats = y_pred_series.to_frame().reset_index().sort_values(by='DateTime')
-            
-            # Rename columns to avoid conflict
-            df_true_stats = df_true_stats.rename(columns={'Temperature': 'Meas_Temp'})
-            df_pred_stats = df_pred_stats.rename(columns={'Temperature': 'Model_Temp'})
-
-            df_merged_stats = pd.merge_asof(
-                df_true_stats,
-                df_pred_stats,
-                on='DateTime',
-                tolerance=pd.Timedelta('10min'),
-                direction='nearest'
-            )
-            df_merged_stats.dropna(inplace=True)
+            df_merged_stats = get_stats_df(y_true_series, y_pred_series)
 
             info_text = "No overlapping data for stats"
-            if not df_merged_stats.empty:
+            if not df_merged_stats.empty and len(df_merged_stats) > 2:
                 
-                # --- FIX for KeyError ---
-                # Use the new, conflict-free column names
                 y_true_stats = df_merged_stats['Meas_Temp']
                 y_pred_stats = df_merged_stats['Model_Temp']
 
@@ -467,7 +555,7 @@ def generate_timeseries_plots(df_model, df_meas, output_dir):
                 info_text = f"R² (det.): {r2_det:.3f}\nr² (corr.): {r2_corr:.3f}\nRMSE: {rmse:.3f} °C"
                 print(f"Stats for {plot_name}: R²={r2_det:.3f}, r²={r2_corr:.3f}, RMSE={rmse:.3f} °C")
             else:
-                print(f"CRITICAL WARNING: No overlapping data found for '{plot_name}' within 10min tolerance.")
+                print(f"CRITICAL WARNING: No overlapping data found for '{plot_name}' within 30min tolerance.")
 
             # --- Create Plot (using the raw, un-merged data) ---
             plt.figure(figsize=(15, 7))
@@ -502,6 +590,7 @@ def generate_timeseries_plots(df_model, df_meas, output_dir):
 
             plt.tight_layout()
             
+            # --- FIX: Save to main output_dir ---
             plot_filename = f'timeseries_comparison_{plot_name}.png'
             plot_filepath = os.path.join(plot_dir, plot_filename)
             plt.savefig(plot_filepath)
@@ -561,12 +650,22 @@ def generate_gradient_plots(df_model, df_meas, output_dir):
     """
     Generates gradient profile plots (Temp vs. Distance) for
     specific locations and times.
+    
+    --- NEW ---
+    - Creates a *separate plot for each time*.
+    - Saves all plots to the main `output_dir`.
     """
     print("\n--- Generating Gradient Profile Plots ---")
     
-    plot_dir = os.path.join(output_dir, 'comparison_plots_gradient')
+    # --- FIX: All plots go directly into output_dir ---
+    plot_dir = output_dir
     if not os.path.exists(plot_dir):
-        os.makedirs(plot_dir)
+        try:
+            os.makedirs(plot_dir)
+            print(f"Created plot directory: {plot_dir}")
+        except Exception as e:
+            print(f"CRITICAL: Could not create plot directory: {e}")
+            return
         
     # Timesteps to plot (as strings)
     # Get a default time if data is available
@@ -581,10 +680,16 @@ def generate_gradient_plots(df_model, df_meas, output_dir):
         
     # Try to find a good day peak
     peak_time = default_time
-    if df_model is not None and not df_model.empty:
-        peak_time = df_model.loc[df_model['Temperature'].idxmax()]['DateTime'].strftime('%Y-%m-%d %H:00:00')
-    elif df_meas is not None and not df_meas.empty:
-        peak_time = df_meas.loc[df_meas['Temperature'].idxmax()]['DateTime'].strftime('%Y-%m-%d %H:00:00')
+    try:
+        # Find peak time from measurements if available
+        if df_meas is not None and not df_meas.empty:
+            peak_time_dt = df_meas.loc[df_meas['Temperature'].idxmax()]['DateTime']
+            peak_time = peak_time_dt.replace(minute=0, second=0).strftime('%Y-%m-%d %H:%M:%S')
+        elif df_model is not None and not df_model.empty:
+            peak_time_dt = df_model.loc[df_model['Temperature'].idxmax()]['DateTime']
+            peak_time = peak_time_dt.replace(minute=0, second=0).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+         pass # Keep default time if peak finding fails
 
     times_to_plot = [
         (pd.to_datetime(peak_time) - pd.Timedelta('3 hours')).strftime('%Y-%m-%d %H:%M:%S'),
@@ -595,91 +700,95 @@ def generate_gradient_plots(df_model, df_meas, output_dir):
     
     print(f"Plotting gradients for times: {times_to_plot}")
     
-    # Locations to plot
-    # We map Model 'SOUTH1'/'SOUTH2' to Measurement 'SOUTH'
-    locations_to_plot = {
-        'ROOF': 'ROOF',
-        'NORTH': 'NORTH',
-        'SOUTH': 'SOUTH' # This will plot Model(SOUTH1+SOUTH2+SOUTH) vs Meas(SOUTH)
-    }
+    # Get all available locations
+    all_model_locs = df_model['Location'].unique()
+    all_meas_locs = df_meas['Location'].unique()
 
-    for model_loc_key, meas_loc in locations_to_plot.items():
-        plt.figure(figsize=(10, 7))
+    for plot_loc in ['ROOF', 'NORTH', 'SOUTH']:
         
-        colors = plt.cm.coolwarm(np.linspace(0, 1, len(times_to_plot)))
-        
-        has_data = False # Flag to check if we plot anything
-        
+        # --- NEW: Create a separate plot for each time ---
         for i, time_str in enumerate(times_to_plot):
+            plt.figure(figsize=(10, 7))
+            has_data = False
+            time_label = time_str[11:16].replace(":", "") # e.g., "1000"
             
             # --- Get Measurement Data ---
-            df_meas_profile = get_profile_at_time(df_meas, meas_loc, time_str)
-            
-            # --- Get Model Data ---
-            # --- FIX for KeyError ---
-            # Build a list of dataframes to concat, then check if list is empty
-            model_profiles_to_concat = []
-            if model_loc_key == 'SOUTH':
-                # Combine SOUTH1, SOUTH2, and SOUTH for the model plot
-                df_model_s1 = get_profile_at_time(df_model, 'SOUTH1', time_str)
-                df_model_s2 = get_profile_at_time(df_model, 'SOUTH2', time_str)
-                df_model_s = get_profile_at_time(df_model, 'SOUTH', time_str)
-                
-                if not df_model_s1.empty:
-                    model_profiles_to_concat.append(df_model_s1)
-                if not df_model_s2.empty:
-                    model_profiles_to_concat.append(df_model_s2)
-                if not df_model_s.empty:
-                    model_profiles_to_concat.append(df_model_s)
+            if plot_loc == 'SOUTH':
+                # Plot both SOUTH_1 and SOUTH_2 if they exist
+                if 'SOUTH_1' in all_meas_locs:
+                    df_meas_s1 = get_profile_at_time(df_meas, 'SOUTH_1', time_str)
+                    if not df_meas_s1.empty:
+                        plt.plot(df_meas_s1['Distance'], df_meas_s1['Temperature'],
+                                 label=f"Meas. S1",
+                                 color='black', linestyle='--', marker='o')
+                        has_data = True
+                if 'SOUTH_2' in all_meas_locs:
+                    df_meas_s2 = get_profile_at_time(df_meas, 'SOUTH_2', time_str)
+                    if not df_meas_s2.empty:
+                        plt.plot(df_meas_s2['Distance'], df_meas_s2['Temperature'],
+                                 label=f"Meas. S2",
+                                 color='grey', linestyle=':', marker='v')
+                        has_data = True
             else:
-                df_model_profile_loc = get_profile_at_time(df_model, model_loc_key, time_str)
-                if not df_model_profile_loc.empty:
-                    model_profiles_to_concat.append(df_model_profile_loc)
+                 if plot_loc in all_meas_locs:
+                     df_meas_profile = get_profile_at_time(df_meas, plot_loc, time_str)
+                     if not df_meas_profile.empty:
+                        plt.plot(df_meas_profile['Distance'], df_meas_profile['Temperature'],
+                                 label=f"Meas.",
+                                 color='black', linestyle='--', marker='o')
+                        has_data = True
+
+            # --- Get Model Data ---
+            if plot_loc == 'SOUTH':
+                # Plot SOUTH1, SOUTH2, and SOUTH if they exist
+                if 'SOUTH1' in all_model_locs:
+                    df_model_s1 = get_profile_at_time(df_model, 'SOUTH1', time_str)
+                    if not df_model_s1.empty:
+                        plt.plot(df_model_s1['Distance'], df_model_s1['Temperature'],
+                                 label=f"Model S1",
+                                 color='red', linestyle='-', marker='x')
+                        has_data = True
+                if 'SOUTH2' in all_model_locs:
+                    df_model_s2 = get_profile_at_time(df_model, 'SOUTH2', time_str)
+                    if not df_model_s2.empty:
+                        plt.plot(df_model_s2['Distance'], df_model_s2['Temperature'],
+                                 label=f"Model S2",
+                                 color='blue', linestyle='-', marker='+')
+                        has_data = True
+                if 'SOUTH' in all_model_locs:
+                    df_model_s = get_profile_at_time(df_model, 'SOUTH', time_str)
+                    if not df_model_s.empty:
+                        plt.plot(df_model_s['Distance'], df_model_s['Temperature'],
+                                 label=f"Model S",
+                                 color='green', linestyle='-', marker='*')
+                        has_data = True
+            else:
+                if plot_loc in all_model_locs:
+                    df_model_profile = get_profile_at_time(df_model, plot_loc, time_str)
+                    if not df_model_profile.empty:
+                        plt.plot(df_model_profile['Distance'], df_model_profile['Temperature'],
+                                 label=f"Model",
+                                 color='red', linestyle='-', marker='x')
+                        has_data = True
             
-            # Only concat and plot if we have data
-            df_model_profile = pd.DataFrame() # Ensure it's defined
-            if model_profiles_to_concat:
-                df_model_profile = pd.concat(model_profiles_to_concat).sort_values(by='Distance')
-
-            # Plot Measurement data
-            if not df_meas_profile.empty:
-                plt.plot(df_meas_profile['Distance'], df_meas_profile['Temperature'],
-                         label=f"Meas. {time_str[11:16]}",
-                         color=colors[i], linestyle='--', marker='o')
-                has_data = True
+            if not has_data:
+                # print(f"No data found for gradient plot: {plot_loc} @ {time_label}")
+                plt.close() # Don't save an empty plot
+                continue # Skip to next time
             
-            # Plot Model data
-            if not df_model_profile.empty:
-                plt.plot(df_model_profile['Distance'], df_model_profile['Temperature'],
-                         label=f"Model {time_str[11:16]}",
-                         color=colors[i], linestyle='-', marker='x')
-                has_data = True
-        
-        if not has_data:
-            print(f"No data found for gradient plot: {model_loc_key}")
-            plt.close() # Don't save an empty plot
-            continue # Skip to next location
-
-        plt.title(f'Temperature Gradient: {model_loc_key}')
-        plt.xlabel('Distance from Surface (m)')
-        plt.ylabel('Air Temperature (°C)')
-        plt.grid(True, linestyle='--', alpha=0.6)
-        
-        # Create a clean legend
-        # Get unique labels
-        handles, labels = plt.gca().get_legend_handles_labels()
-        by_label = dict(zip(labels, handles))
-        if by_label:
-            plt.legend(by_label.values(), by_label.keys(), loc='best')
-
-        plt.tight_layout()
-        
-        plot_filename = f'gradient_profile_{model_loc_key}.png'
-        plot_filepath = os.path.join(plot_dir, plot_filename)
-        plt.savefig(plot_filepath)
-        plt.close()
-        
-        print(f"Successfully created plot: {plot_filename}")
+            plt.title(f'Temperature Gradient: {plot_loc} at {time_str}')
+            plt.xlabel('Distance from Surface (m)')
+            plt.ylabel('Air Temperature (°C)')
+            plt.grid(True, linestyle='--', alpha=0.6)
+            plt.legend(loc='best', fontsize='small')
+            plt.tight_layout()
+            
+            plot_filename = f'gradient_profile_{plot_loc}_{time_label}.png'
+            plot_filepath = os.path.join(plot_dir, plot_filename)
+            plt.savefig(plot_filepath)
+            plt.close()
+            
+            print(f"Successfully created plot: {plot_filename}")
         
     print("\n--- All processing complete ---")
 
@@ -689,12 +798,14 @@ if __name__ == '__main__':
     # !! IMPORTANT: Update this path to your data folder !!
     # This script will search this folder AND all subfolders
     # Use r'...' (raw string) to avoid SyntaxWarning on Windows
-    data_directory = r'Y:\Danmark_Building\Danmark_Building_Validation_Long\receptors'
-    
+    #data_directory = r'Y:\Danmark_Building\Danmark_Building_Validation_Terrain_Short\receptors'
+    data_directory = r'Y:\Danmark_Building\Danmark_Building_Validation_Long_MO\receptors'
+
     # Use r'...' for all Windows paths
     #measurement_csv_name = r'D:\enviprojects\Projektwerkstatt_Nissen_Schoefl\Measurements_220719_1hCorr_ALLDISTS.csv' 
+    measurement_csv_name = r'D:\enviprojects\Projektwerkstatt_Nissen_Schoefl\Measurements_LongPeriod_1hCorr_ALLDISTS.csv' 
     #measurement_csv_name = r'D:\enviprojects\Projektwerkstatt_Nissen_Schoefl\Measurements_220719_1hCorr.csv' 
-    measurement_csv_name = r'D:\enviprojects\Projektwerkstatt_Nissen_Schoefl\Measurements_LongPeriod_1hCorr.csv' 
+    #measurement_csv_name = r'D:\enviprojects\Projektwerkstatt_Nissen_Schoefl\Measurements_LongPeriod_1hCorr.csv' 
     output_dir = r'D:\CompPlotsDanmark'
     # --- End of User-defined section ---
 
@@ -723,6 +834,14 @@ if __name__ == '__main__':
     if (df_model is not None and not df_model.empty) or \
        (df_meas is not None and not df_meas.empty):
         
+        # Check if dataframes are valid
+        if df_model is None or df_model.empty:
+            print("Warning: Model data is empty. Skipping plots.")
+            df_model = pd.DataFrame(columns=['DateTime', 'Location', 'Distance', 'Temperature']) # Create empty for safety
+        if df_meas is None or df_meas.empty:
+            print("Warning: Measurement data is empty. Skipping plots.")
+            df_meas = pd.DataFrame(columns=['DateTime', 'Location', 'Distance', 'Temperature']) # Create empty for safety
+            
         # Generate the new "closest distance" time-series plots
         generate_timeseries_plots(df_model.copy(), df_meas.copy(), output_dir)
         
