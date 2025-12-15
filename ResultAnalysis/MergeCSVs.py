@@ -94,8 +94,8 @@ def process_data(meas_root, model_root):
                         df_m['DateTime'] = pd.to_datetime(df_m['DateTime'], errors='coerce')
                         df_m = df_m.dropna(subset=['DateTime'])
                         
-                        # Filter: Höhe ca. 2.10 m
-                        mask_height = np.isclose(df_m['z (m)'], 2.10, atol=0.05)
+                        # Filter: Höhe ca. 2.70 m
+                        mask_height = np.isclose(df_m['z (m)'], 2.70, atol=0.05)
                         df_m_subset = df_m[mask_height].copy()
                         
                         if not df_m_subset.empty:
@@ -118,7 +118,7 @@ def process_data(meas_root, model_root):
                                 df_m_subset['Timestamp'] = df_m_subset['Timestamp'].dt.round('min')
                                 
                                 df_model_ready = df_m_subset
-                                print(f"  -> Modelldaten OK: {len(df_model_ready)} Zeilen (z=2.1m) vorbereitet.")
+                                print(f"  -> Modelldaten OK: {len(df_model_ready)} Zeilen (z=2.7m) vorbereitet.")
                             else:
                                 print(f"  [Warnung] Modelldatei fehlen Spalten. Vorhanden: {df_m_subset.columns.tolist()}")
                         else:
