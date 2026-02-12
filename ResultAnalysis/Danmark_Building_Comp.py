@@ -440,7 +440,7 @@ def generate_timeseries_plots(df_model, df_meas, output_dir):
     # 2. ROOF (Nearest Height Logic)
     if 'ROOF' in model_dists_series and 'ROOF' in meas_dists_series:
         # Find meas dist closest to 1.0m (a common, representative height)
-        target_meas_dist = 1.0
+        target_meas_dist = 1
         meas_idx_r = find_closest_value_idx(meas_dists_series['ROOF'], target_meas_dist)
         if pd.notna(meas_idx_r):
              meas_dist_r = meas_dists_series['ROOF'][meas_idx_r] # e.g., 1.0m
@@ -798,8 +798,9 @@ if __name__ == '__main__':
     # !! IMPORTANT: Update this path to your data folder !!
     # This script will search this folder AND all subfolders
     # Use r'...' (raw string) to avoid SyntaxWarning on Windows
-    #data_directory = r'Y:\Danmark_Building\Danmark_Building_Validation_Terrain_Short\receptors'
-    data_directory = r'Y:\Danmark_Building\Danmark_Building_Validation_Long_MO\receptors'
+    #data_directory = r'Y:\Danmark_Building\Danmark_Building_Validation_Short_new\receptors'
+    #data_directory = r'Y:\Danmark_Building\Danmark_Building_Validation_Long_new\receptors'
+    data_directory = r'Y:\Danmark_Building\Danmark_Building_Validation_Long_V56\receptors'
 
     # Use r'...' for all Windows paths
     #measurement_csv_name = r'D:\enviprojects\Projektwerkstatt_Nissen_Schoefl\Measurements_220719_1hCorr_ALLDISTS.csv' 
@@ -846,6 +847,6 @@ if __name__ == '__main__':
         generate_timeseries_plots(df_model.copy(), df_meas.copy(), output_dir)
         
         # Generate the new "gradient profile" plots
-        generate_gradient_plots(df_model.copy(), df_meas.copy(), output_dir)
+        #generate_gradient_plots(df_model.copy(), df_meas.copy(), output_dir)
     else:
         print("\nCRITICAL: No data was loaded from model or measurements. Skipping plot generation.")
