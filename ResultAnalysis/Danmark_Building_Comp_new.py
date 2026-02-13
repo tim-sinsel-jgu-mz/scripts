@@ -294,20 +294,20 @@ def run_plotting(df_meas, df_m1, df_m2, out_dir):
             
             if not ts_meas.empty:
                 # Plotten mit Lücken (dank Resampling enthält ts_meas NaNs)
-                ax.plot(ts_meas.index, ts_meas, color='black', label='Meas', lw=1.0, alpha=0.9)
+                ax.plot(ts_meas.index, ts_meas, color='black', label='Meas', lw=1.0, alpha=0.8)
             
             stats_txt = []
             
             # V56
             if not ts_m1.empty:
-                ax.plot(ts_m1.index, ts_m1, color='#1f77b4', label='V56', linestyle='--', lw=1.2)
+                ax.plot(ts_m1.index, ts_m1, color='#1f77b4', label='V56', lw=1, alpha=0.8)
                 rmse, r2 = calc_stats_safe(ts_meas, ts_m1)
                 if not np.isnan(rmse): 
                     stats_txt.append(f"V56: $R^2$={r2:.2f}, RMSE={rmse:.2f}")
 
             # New
             if not ts_m2.empty:
-                ax.plot(ts_m2.index, ts_m2, color='#d62728', label='V59', linestyle='-.', lw=1.2)
+                ax.plot(ts_m2.index, ts_m2, color='#d62728', label='V59', lw=1, alpha=0.8)
                 rmse, r2 = calc_stats_safe(ts_meas, ts_m2)
                 if not np.isnan(rmse): 
                     stats_txt.append(f"V59: $R^2$={r2:.2f}, RMSE={rmse:.2f}")
@@ -333,6 +333,8 @@ def run_plotting(df_meas, df_m1, df_m2, out_dir):
 
     fpath = os.path.join(out_dir, 'Validation_Comparison_Final_v10.png')
     plt.savefig(fpath, dpi=300)
+    fpath = os.path.join(out_dir, 'Validation_Comparison_Final_v10.svg')
+    plt.savefig(fpath)
     print(f"Fertig! Gespeichert unter: {fpath}")
 
 if __name__ == "__main__":
