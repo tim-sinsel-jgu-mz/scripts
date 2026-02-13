@@ -16,6 +16,12 @@ plt.rcParams['axes.linewidth'] = 1.0
 plt.rcParams['xtick.direction'] = 'in'
 plt.rcParams['ytick.direction'] = 'in'
 
+def find_col(header, pattern):
+    p = re.compile(pattern, re.IGNORECASE)
+    for h in header:
+        if p.search(h): return h
+    return None
+
 def load_envimet_receptors(data_directory: str, roof_base_height: float, label: str, out_dir: str) -> pd.DataFrame:
     print(f"--- [{label}] Lade Modell-Daten aus: {data_directory} ---")
     
@@ -46,17 +52,18 @@ def load_envimet_receptors(data_directory: str, roof_base_height: float, label: 
                 header_line = f.readline()
                 header = [h.strip() for h in header_line.split(',')]
             
-            col_dt = 'DateTime'
-            col_z = 'z (m)'
-            col_temp = 'Potential Air Temperature (°C)'
+            col_dt = find_col(header, r'DateTime')
+            col_z = find_col(header, r'z \(m\)')
+            col_temp = find_col(header, r'Potential Air Temperature')
             
-            if col_z not in header or col_temp not in header: continue
+            if not col_z or not col_temp or not col_dt: 
+                continue
 
             df = pd.read_csv(file_path, skiprows=1, names=header, 
                              usecols=[col_dt, col_temp, col_z], 
                              encoding='cp1252', on_bad_lines='skip')
             
-            df.rename(columns={col_temp: 'Temperature', col_z: 'z'}, inplace=True)
+            df.rename(columns={col_temp: 'Temperature', col_z: 'z', col_dt: 'DateTime'}, inplace=True)
             
             df['DateTime'] = pd.to_datetime(df['DateTime'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
             if df['DateTime'].isna().all():
@@ -67,13 +74,25 @@ def load_envimet_receptors(data_directory: str, roof_base_height: float, label: 
             df['z'] = pd.to_numeric(df['z'], errors='coerce')
             df.dropna(inplace=True)
 
-            df['Location'] = loc_raw
-            
+            # Sanity Check
+            df = df[(df['Temperature'] > -40.0) & (df['Temperature'] < 60.0)]
+
+            # LOGIK: ROOF vs FASSADE
             if loc_raw == 'ROOF':
+                df['Location'] = loc_raw
                 df['Distance'] = (df['z'] - roof_base_height).round(2)
             else:
-                df['Distance'] = dist_filename 
-                df = df.drop_duplicates(subset=['DateTime'])
+                # FASSADEN: Nur z=1.75m und z=2.25m behalten
+                mask_z = np.isclose(df['z'], 1.75, atol=0.05) | np.isclose(df['z'], 2.25, atol=0.05)
+                df = df[mask_z]
+                if df.empty: continue
+                
+                # Mittelwert über Höhen (eliminiert Duplikate und glättet Vertikal-Gradient)
+                df = df.groupby('DateTime')['Temperature'].mean().reset_index()
+                
+                df['Location'] = loc_raw
+                df['Distance'] = dist_filename
+                df['z'] = 2.0 
 
             all_dfs.append(df[['DateTime', 'Location', 'Distance', 'z', 'Temperature']])
             
@@ -86,7 +105,6 @@ def load_envimet_receptors(data_directory: str, roof_base_height: float, label: 
     # Deduplizierung
     df_unique = df_total.groupby(['DateTime', 'Location', 'Distance', 'z'], as_index=False)['Temperature'].mean()
     
-    # Debug CSV
     try:
         csv_path = os.path.join(out_dir, f'DEBUG_ModelData_{label}.csv')
         df_unique.to_csv(csv_path, index=False)
@@ -106,7 +124,7 @@ def load_measurements(file_path: str, out_dir: str) -> pd.DataFrame:
     df.rename(columns={dt_col: 'DateTime'}, inplace=True)
     df['DateTime'] = pd.to_datetime(df['DateTime'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
     
-    # --- TIME FIX: +3 Minuten ---
+    # Time Fix +3 min
     df['DateTime'] = df['DateTime'] + pd.Timedelta(minutes=3)
     df['DateTime'] = df['DateTime'].dt.round('min')
     
@@ -139,7 +157,6 @@ def load_measurements(file_path: str, out_dir: str) -> pd.DataFrame:
     df_clean = df.dropna(subset=['Location', 'Distance', 'Temperature'])
     df_clean = df_clean.groupby(['DateTime', 'Location', 'Distance'], as_index=False)['Temperature'].mean()
     
-    # Debug CSV
     try:
         csv_path = os.path.join(out_dir, 'DEBUG_MeasData.csv')
         df_clean.to_csv(csv_path, index=False)
@@ -160,24 +177,21 @@ def get_series_model(df, location, dist_key):
             valid = df_loc[df_loc['z_diff'] < 0.1]
             if valid.empty: return pd.Series(dtype=float)
             best_z = valid.loc[valid['z_diff'].idxmin()]['z']
-            return valid[valid['z'] == best_z].set_index('DateTime')['Temperature'].sort_index()
+            series = valid[valid['z'] == best_z].set_index('DateTime')['Temperature'].sort_index()
         else:
             return pd.Series(dtype=float)
 
-    df_loc['diff'] = abs(df_loc['Distance'] - dist_key)
-    valid = df_loc[df_loc['diff'] < 0.15]
-    if valid.empty: return pd.Series(dtype=float)
+    else: # FASSADEN
+        df_loc['diff'] = abs(df_loc['Distance'] - dist_key)
+        valid = df_loc[df_loc['diff'] < 0.15]
+        if valid.empty: return pd.Series(dtype=float)
+        
+        best_dist = valid.loc[valid['diff'].idxmin()]['Distance']
+        series = valid[valid['Distance'] == best_dist].set_index('DateTime')['Temperature'].sort_index()
     
-    best_dist = valid.loc[valid['diff'].idxmin()]['Distance']
-    return valid[valid['Distance'] == best_dist].set_index('DateTime')['Temperature'].sort_index()
+    return series.groupby(level=0).mean()
 
 def get_series_meas(df, location, dist_key):
-    """
-    Holt Mess-Zeitreihe.
-    FEATURES:
-    1. Strict Distance Filter: Verhindert Vermischung von 0.4m und 0.5m
-    2. Resampling: Erzeugt Lücken (NaN) wenn Daten fehlen (z.B. South1 Mittag)
-    """
     if df.empty: return pd.Series(dtype=float)
 
     df_loc = df[df['Location'] == location].copy()
@@ -185,7 +199,6 @@ def get_series_meas(df, location, dist_key):
 
     final_series = pd.Series(dtype=float)
 
-    # --- ROOF 1.0m ---
     if location == 'ROOF':
         if dist_key == 1.5:
             target = 1.0
@@ -196,67 +209,53 @@ def get_series_meas(df, location, dist_key):
         else:
             return pd.Series(dtype=float)
 
-    # --- FASSADEN 1.5m (Mittelwert) ---
     elif dist_key == 1.5:
-        # Hier müssen wir aufpassen: Erst strikt 1.0 holen, dann strikt 2.0 holen
         s1 = pd.Series(dtype=float)
         s2 = pd.Series(dtype=float)
         
-        # Strikt 1.0m
         diff1 = abs(df_loc['Distance'] - 1.0)
         valid1 = df_loc[diff1 < 0.1]
         if not valid1.empty:
-            # Beste Distanz finden (falls 0.95 und 1.0 existieren)
             best1 = valid1.loc[abs(valid1['Distance'] - 1.0).idxmin()]['Distance']
             s1 = valid1[valid1['Distance'] == best1].set_index('DateTime')['Temperature']
             
-        # Strikt 2.0m
         diff2 = abs(df_loc['Distance'] - 2.0)
         valid2 = df_loc[diff2 < 0.1]
         if not valid2.empty:
             best2 = valid2.loc[abs(valid2['Distance'] - 2.0).idxmin()]['Distance']
             s2 = valid2[valid2['Distance'] == best2].set_index('DateTime')['Temperature']
         
-        # Mitteln
-        s1 = s1.groupby(level=0).mean()
-        s2 = s2.groupby(level=0).mean()
-        common = s1.index.intersection(s2.index)
-        if not common.empty:
-            final_series = (s1.loc[common] + s2.loc[common]) / 2.0
+        if not s1.empty and not s2.empty:
+             s1 = s1.groupby(level=0).mean()
+             s2 = s2.groupby(level=0).mean()
+             common = s1.index.intersection(s2.index)
+             if not common.empty:
+                 final_series = (s1.loc[common] + s2.loc[common]) / 2.0
 
-    # --- FASSADEN 0.5m (Der kritische Fall für North) ---
-    else: # dist_key == 0.5
+    else: # 0.5m
         target = 0.5
-        # 1. Kandidaten sammeln (z.B. 0.4m und 0.5m)
         df_loc['diff'] = abs(df_loc['Distance'] - target)
-        valid = df_loc[df_loc['diff'] < 0.15] # Toleranz 15cm
+        valid = df_loc[df_loc['diff'] < 0.15]
         
         if not valid.empty:
-            # 2. FIX: Wähle NUR die Distanz, die am nächsten an 0.5 liegt
-            # Bei North wird das 0.5 sein. 0.4 wird ignoriert.
             best_dist = valid.loc[valid['diff'].idxmin()]['Distance']
-            
-            # 3. Nur diese Distanz behalten
             final_series = valid[valid['Distance'] == best_dist].set_index('DateTime')['Temperature'].sort_index()
 
-    # --- GAP HANDLING ---
-    # Resample auf 5 Minuten Intervalle.
-    # Da Messdaten ca. alle 5 min (+3min offset) vorliegen, 
-    # erzeugt dies NaN-Werte, wo Zeitpunkte fehlen (Lücken).
     if not final_series.empty:
-        # '5min' Resampling. .mean() hält die Werte (da nur 1 Wert pro Bin), 
-        # setzt aber NaN wo nix ist.
+        final_series = final_series.groupby(level=0).mean()
         final_series = final_series.resample('5min').mean()
         
     return final_series
 
 def calc_stats_safe(s_meas, s_model):
     try:
-        # Drop NaNs aus dem Resampling bevor gerechnet wird
         s_meas_clean = s_meas.dropna()
-        if s_meas_clean.empty or s_model.empty: return np.nan, np.nan
+        # Drop NaNs aus Modell (falls durch Glättung Ränder fehlen)
+        s_model_clean = s_model.dropna()
         
-        s_model_aligned = s_model.reindex(s_meas_clean.index, method='nearest', tolerance=pd.Timedelta('30min'))
+        if s_meas_clean.empty or s_model_clean.empty: return np.nan, np.nan
+        
+        s_model_aligned = s_model_clean.reindex(s_meas_clean.index, method='nearest', tolerance=pd.Timedelta('30min'))
         mask = s_model_aligned.notna()
         y_true = s_meas_clean[mask]
         y_pred = s_model_aligned[mask]
@@ -268,7 +267,6 @@ def calc_stats_safe(s_meas, s_model):
 def run_plotting(df_meas, df_m1, df_m2, out_dir):
     print("\n--- Erstelle Plots ---")
     
-    # 7 Plots untereinander
     fig, axes = plt.subplots(7, 1, figsize=(10, 24), constrained_layout=True)
     
     pairs = [
@@ -292,27 +290,37 @@ def run_plotting(df_meas, df_m1, df_m2, out_dir):
             ts_m1 = get_series_model(df_m1, mod_loc, d_key)
             ts_m2 = get_series_model(df_m2, mod_loc, d_key)
             
+            # --- GLÄTTUNG FÜR NEW (V59) ---
+            # Rolling Mean: window=5 (bei 5min Daten = 25min), center=True
+            if not ts_m2.empty:
+                ts_m2 = ts_m2.rolling(window=5, center=True, min_periods=1).mean()
+            
+            # Debug Output
+            label_dist = "05" if d_key == 0.5 else "15"
+            debug_name = f"{meas_loc}_{label_dist}"
+            
             if not ts_meas.empty:
-                # Plotten mit Lücken (dank Resampling enthält ts_meas NaNs)
+                ts_meas.to_csv(os.path.join(out_dir, f"DEBUG_Plot_{debug_name}_Meas.csv"), header=["Temperature"])
                 ax.plot(ts_meas.index, ts_meas, color='black', label='Meas', lw=1.0, alpha=0.8)
             
             stats_txt = []
             
             # V56
             if not ts_m1.empty:
+                ts_m1.to_csv(os.path.join(out_dir, f"DEBUG_Plot_{debug_name}_V56.csv"), header=["Temperature"])
                 ax.plot(ts_m1.index, ts_m1, color='#1f77b4', label='V56', lw=1, alpha=0.8)
                 rmse, r2 = calc_stats_safe(ts_meas, ts_m1)
                 if not np.isnan(rmse): 
                     stats_txt.append(f"V56: $R^2$={r2:.2f}, RMSE={rmse:.2f}")
 
-            # New
+            # New (Geglättet)
             if not ts_m2.empty:
+                ts_m2.to_csv(os.path.join(out_dir, f"DEBUG_Plot_{debug_name}_NEW_Smoothed.csv"), header=["Temperature"])
                 ax.plot(ts_m2.index, ts_m2, color='#d62728', label='V59', lw=1, alpha=0.8)
                 rmse, r2 = calc_stats_safe(ts_meas, ts_m2)
                 if not np.isnan(rmse): 
                     stats_txt.append(f"V59: $R^2$={r2:.2f}, RMSE={rmse:.2f}")
             
-            # Titel
             if meas_loc == 'ROOF':
                 title = "ROOF 1.0 m"
             else:
@@ -331,9 +339,9 @@ def run_plotting(df_meas, df_m1, df_m2, out_dir):
                 ax.text(0.98, 0.02, t, transform=ax.transAxes, ha='right', va='bottom', fontsize=8,
                         bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#cccccc'))
 
-    fpath = os.path.join(out_dir, 'Validation_Comparison_Final_v10.png')
+    fpath = os.path.join(out_dir, 'Validation_Comparison.png')
     plt.savefig(fpath, dpi=300)
-    fpath = os.path.join(out_dir, 'Validation_Comparison_Final_v10.svg')
+    fpath = os.path.join(out_dir, 'Validation_Comparison.svg')
     plt.savefig(fpath)
     print(f"Fertig! Gespeichert unter: {fpath}")
 
