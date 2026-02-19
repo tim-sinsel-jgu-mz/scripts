@@ -144,7 +144,7 @@ def format_plot(ax, y_lim=None, num_yticks=None, y_label=None, x_lim=None, ytick
     if y_lim: ax.set_ylim(y_lim)
     if x_lim: ax.set_xlim(x_lim)
         
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%m"))
     ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
     ax.tick_params(axis='x', which='major', length=5, direction='in', labelsize=TICK_LABEL_SIZE)
     
@@ -156,11 +156,11 @@ def format_plot(ax, y_lim=None, num_yticks=None, y_label=None, x_lim=None, ytick
         ax.tick_params(axis='y', which='major', length=3, direction='in', labelsize=TICK_LABEL_SIZE)
         
     ax.grid(SHOW_GRID, **GRID_STYLE)
-    plt.setp(ax.get_xticklabels(), rotation=-45, ha='left')
+    plt.setp(ax.get_xticklabels(), rotation=0, ha='center')
     
     if y_label:
         ax.set_ylabel(y_label, fontsize=AXIS_LABEL_SIZE, fontweight='bold')
-    ax.set_xlabel(AXIS_LABELS['x'], fontsize=AXIS_LABEL_SIZE, fontweight='bold')
+    #ax.set_xlabel(AXIS_LABELS['x'], fontsize=AXIS_LABEL_SIZE, fontweight='bold')
 
 # --------------------------
 # Plotting Functions

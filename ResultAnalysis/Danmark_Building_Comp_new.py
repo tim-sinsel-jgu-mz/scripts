@@ -5,16 +5,20 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import seaborn as sns
 from sklearn.metrics import mean_squared_error, r2_score
 
 # --- PLOT STYLE ---
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['Arial']
+sns.set_theme(style="whitegrid", context="paper", font_scale=1)
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Arial']
 plt.rcParams['font.size'] = 12
 plt.rcParams['lines.linewidth'] = 1.0 
 plt.rcParams['axes.linewidth'] = 1.0
 plt.rcParams['xtick.direction'] = 'in'
 plt.rcParams['ytick.direction'] = 'in'
+plt.rcParams['savefig.dpi'] = 300
+plt.rcParams['figure.constrained_layout.use'] = True
 
 def find_col(header, pattern):
     p = re.compile(pattern, re.IGNORECASE)
@@ -294,16 +298,24 @@ def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
             lbl = "0.5 m" if d_key == 0.5 else "1.5 m"
             title = f"{meas_loc} {lbl}" 
 
-        ax.set_title(title, fontweight='bold', loc='left', fontsize=10)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%Hh'))
-        ax.grid(True, linestyle=':', alpha=0.6)
+        ax.set_title(title, fontweight='bold', loc='left', fontsize=12)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m'))
+        
+        # --- Updated Styling ---
+        ax.grid(True, color='#DDDDDD', linestyle='--', linewidth=0.2)
+        for spine in ax.spines.values():
+            spine.set_color('#DDDDDD')
+            spine.set_linewidth(1.0)
+            
+        ax.tick_params(axis='both', which='major', colors='black', labelsize=12, direction='in', length=5)
+        
         ax.set_ylim(8, 27)
-        ax.set_ylabel("Temp. (°C)")
+        ax.set_ylabel("Temp. [°C]", fontsize=12, fontweight='bold')
         
         if stats_txt:
             t = "\n".join(stats_txt)
-            ax.text(0.98, 0.02, t, transform=ax.transAxes, ha='right', va='bottom', fontsize=8,
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#cccccc'))
+            ax.text(0.98, 0.05, t, transform=ax.transAxes, ha='right', va='bottom', fontsize=12,
+                    bbox=dict(boxstyle='square,pad=0.3', facecolor='white', edgecolor='#DDDDDD', linewidth=1))
 
     plt.savefig(out_path, dpi=300)
     print(f"Fertig! Gespeichert unter: {out_path}")
