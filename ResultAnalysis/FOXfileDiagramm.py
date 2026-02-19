@@ -40,7 +40,7 @@ STYLE_CONFIG = {
 }
 
 VAR_STYLES = {
-    'q': {'linestyle': '--', 'color': '#1f77b4'}, # Orange for Specific Humidity
+    'q': {'linestyle': '--', 'color': '#1f77b4'}, # Blue for Specific Humidity
     'wd': {'linestyle': '--', 'color': '#ff7f0e'}  # Orange for Wind Dir
 }
 
@@ -52,13 +52,13 @@ AXIS_LABELS = {
     'y_sw': "Shortwave Radiation [W/m²]",
     'y_lw': "Longwave Radiation [W/m²]",
     'y_temp': "Air Temperature [°C]",
-    'y_q': "Specific Humidity [g/kg]", # Changed from Relative Humidity
+    'y_q': "Specific Humidity [g/kg]",
     'y_wind_speed': "Wind Speed [m/s]",
     'y_wind_direction': "Wind Direction [°]",
     'title_sw_direct': 'Direct Shortwave Radiation',
     'title_sw_diffuse': 'Diffuse Shortwave Radiation',
     'title_lw': 'Longwave Radiation',
-    'title_temp_humidity': 'Air Temperature and Specific Humidity', # Updated Title
+    'title_temp_humidity': 'Air Temperature and Specific Humidity',
     'title_wind': 'Wind Conditions',
     'title_sw_direct_diffuse': 'Direct and Diffuse Shortwave Radiation'
 }
@@ -140,7 +140,7 @@ def filter_data(df, start_datetime, end_datetime):
     if df is None or df.empty: return pd.DataFrame()
     return df[(df['DateTime'] >= start_datetime) & (df['DateTime'] <= end_datetime)]
 
-def format_plot(ax, y_lim=None, num_yticks=None, y_label=None, x_lim=None):
+def format_plot(ax, y_lim=None, num_yticks=None, y_label=None, x_lim=None, yticks=None):
     if y_lim: ax.set_ylim(y_lim)
     if x_lim: ax.set_xlim(x_lim)
         
@@ -148,7 +148,10 @@ def format_plot(ax, y_lim=None, num_yticks=None, y_label=None, x_lim=None):
     ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
     ax.tick_params(axis='x', which='major', length=5, direction='in', labelsize=TICK_LABEL_SIZE)
     
-    if num_yticks:
+    if yticks is not None:
+        ax.set_yticks(yticks)
+        ax.tick_params(axis='y', which='major', length=3, direction='in', labelsize=TICK_LABEL_SIZE)
+    elif num_yticks:
         ax.yaxis.set_major_locator(MaxNLocator(num_yticks))
         ax.tick_params(axis='y', which='major', length=3, direction='in', labelsize=TICK_LABEL_SIZE)
         
@@ -162,38 +165,9 @@ def format_plot(ax, y_lim=None, num_yticks=None, y_label=None, x_lim=None):
 # --------------------------
 # Plotting Functions
 # --------------------------
-""" 
-def plot_direct_sw_radiation(df, start_dt, end_dt):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    if 'directrad' in df.columns:
-        ax.plot(df['DateTime'], df['directrad'], color=STYLE_CONFIG['color'], linewidth=STYLE_CONFIG['linewidth'], label='Direct SW')
-    format_plot(ax, y_lim=[-3, 800], num_yticks=NUM_Y_TICKS, y_label=AXIS_LABELS['y_sw_direct'], x_lim=[start_dt, end_dt])
-    ax.set_title(AXIS_LABELS['title_sw_direct'], fontsize=AXIS_LABEL_SIZE + 1, fontweight='bold', pad=20)
-    plt.savefig(r"D:\CompPlotsDanmark\FOX\direct_sw_radiation.svg", format='svg', bbox_inches='tight')
-    plt.close()
-
-def plot_diffuse_sw_radiation(df, start_dt, end_dt):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    if 'diffuserad' in df.columns:
-        ax.plot(df['DateTime'], df['diffuserad'], color=STYLE_CONFIG['color'], linewidth=STYLE_CONFIG['linewidth'], label='Diffuse SW')
-    format_plot(ax, y_lim=[-2, 200], num_yticks=NUM_Y_TICKS, y_label=AXIS_LABELS['y_sw_diffuse'], x_lim=[start_dt, end_dt])
-    ax.set_title(AXIS_LABELS['title_sw_diffuse'], fontsize=AXIS_LABEL_SIZE + 1, fontweight='bold', pad=20)
-    plt.savefig(r"D:\CompPlotsDanmark\FOX\diffuse_sw_radiation.svg", format='svg', bbox_inches='tight')
-    plt.close()
-
-def plot_longwave_radiation(df, start_dt, end_dt):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    if 'lw' in df.columns:
-        ax.plot(df['DateTime'], df['lw'], color=STYLE_CONFIG['color'], linewidth=STYLE_CONFIG['linewidth'], label='Longwave')
-    format_plot(ax, y_lim=[350, 600], num_yticks=NUM_Y_TICKS, y_label=AXIS_LABELS['y_lw'], x_lim=[start_dt, end_dt])
-    ax.set_title(AXIS_LABELS['title_lw'], fontsize=AXIS_LABEL_SIZE + 1, fontweight='bold', pad=20)
-    plt.savefig(r"D:\CompPlotsDanmark\FOX\longwave_radiation.svg", format='svg', bbox_inches='tight')
-    plt.close()
-"""
 
 def plot_sw_radiation(df, start_dt, end_dt):
     fig, axdir = plt.subplots(figsize=(10, 6))
-    #ax_diff = axdir.twinx()
 
     if 'directrad' in df.columns:
         l1 = axdir.plot(df['DateTime'], df['directrad'], 
@@ -208,11 +182,12 @@ def plot_sw_radiation(df, start_dt, end_dt):
                           linewidth=STYLE_CONFIG['linewidth'],
                           label='Diffuse')
 
-    format_plot(axdir, y_lim=[-3, 800], num_yticks=NUM_Y_TICKS, y_label=AXIS_LABELS['y_sw'], x_lim=[start_dt, end_dt])
+    # Start at 0, break at 200 W/m² increments (5 ticks)
+    sw_ylim = [0, 800]
+    sw_ticks = np.arange(0, 801, 200)
 
-    #axdir.set_title(AXIS_LABELS['title_sw_direct_diffuse'], fontsize=AXIS_LABEL_SIZE + 1, fontweight='bold', pad=20)
+    format_plot(axdir, y_lim=sw_ylim, yticks=sw_ticks, y_label=AXIS_LABELS['y_sw'], x_lim=[start_dt, end_dt])
 
-    # Legend
     try:
         lns = l1 + l2
         labs = [l.get_label() for l in lns]
@@ -228,15 +203,12 @@ def plot_temperature_humidity(df, start_dt, end_dt):
     fig, ax_temp = plt.subplots(figsize=(10, 6))
     ax_humidity = ax_temp.twinx()
     
-    # 1. Plot Temperature (Primary Axis)
     if 'at' in df.columns:
-        # Convert Kelvin to Celsius
         l1 = ax_temp.plot(df['DateTime'], df['at'] - 273.15, 
                      color='#d62728', 
                      linewidth=STYLE_CONFIG['linewidth'], 
                      label='Air Temperature')
     
-    # 2. Plot Specific Humidity (Secondary Axis)
     if 'q' in df.columns:
         l2 = ax_humidity.plot(df['DateTime'], df['q'], 
                          color=VAR_STYLES['q']['color'], 
@@ -244,14 +216,15 @@ def plot_temperature_humidity(df, start_dt, end_dt):
                          linewidth=STYLE_CONFIG['linewidth'],
                          label='Specific Humidity')
         
-    format_plot(ax_temp, y_lim=[10, 25], num_yticks=NUM_Y_TICKS, y_label=AXIS_LABELS['y_temp'], x_lim=[start_dt, end_dt])
+    temp_ylim = [10, 25]
+    humidity_ylim = [0, 20]
     
-    # Specific Humidity Range (Adjusted for g/kg, typically 0-15 or 0-20 in summer)
-    format_plot(ax_humidity, y_lim=[0, 20], num_yticks=NUM_Y_TICKS, y_label=AXIS_LABELS['y_q'])
+    temp_ticks = np.linspace(temp_ylim[0], temp_ylim[1], NUM_Y_TICKS)
+    humidity_ticks = np.linspace(humidity_ylim[0], humidity_ylim[1], NUM_Y_TICKS)
     
-    #ax_temp.set_title(AXIS_LABELS['title_temp_humidity'], fontsize=AXIS_LABEL_SIZE + 1, fontweight='bold', pad=20)
+    format_plot(ax_temp, y_lim=temp_ylim, yticks=temp_ticks, y_label=AXIS_LABELS['y_temp'], x_lim=[start_dt, end_dt])
+    format_plot(ax_humidity, y_lim=humidity_ylim, yticks=humidity_ticks, y_label=AXIS_LABELS['y_q'])
     
-    # Legend
     try:
         lns = l1 + l2
         labs = [l.get_label() for l in lns]
@@ -279,9 +252,15 @@ def plot_wind(df, start_dt, end_dt):
                           linewidth=STYLE_CONFIG['linewidth'],
                           label='Wind Direction')
 
-    format_plot(ax_speed, y_lim=[0, 4], num_yticks=NUM_Y_TICKS, y_label=AXIS_LABELS['y_wind_speed'], x_lim=[start_dt, end_dt])
-    format_plot(ax_direction, y_lim=[0, 360], num_yticks=NUM_Y_TICKS, y_label=AXIS_LABELS['y_wind_direction'])
-    #ax_speed.set_title(AXIS_LABELS['title_wind'], fontsize=AXIS_LABEL_SIZE + 1, fontweight='bold', pad=20)
+    # Changed max wind speed to 6 to generate 7 clean ticks (0, 1, 2, 3, 4, 5, 6)
+    speed_ylim = [0, 3.6] 
+    direction_ylim = [0, 360]
+    
+    speed_ticks = np.linspace(speed_ylim[0], speed_ylim[1], 7)
+    direction_ticks = np.arange(0, 361, 60) # 7 Ticks: 0, 60, 120, 180, 240, 300, 360
+
+    format_plot(ax_speed, y_lim=speed_ylim, yticks=speed_ticks, y_label=AXIS_LABELS['y_wind_speed'], x_lim=[start_dt, end_dt])
+    format_plot(ax_direction, y_lim=direction_ylim, yticks=direction_ticks, y_label=AXIS_LABELS['y_wind_direction'])
     
     try:
         lns = l1 + l2
@@ -304,11 +283,6 @@ def main():
         if df_filtered.empty:
             print(f"No data found in the time range {START_DATETIME} to {END_DATETIME}")
         else:
-            '''
-            plot_direct_sw_radiation(df_filtered, start_dt, end_dt)
-            plot_diffuse_sw_radiation(df_filtered, start_dt, end_dt)
-            plot_longwave_radiation(df_filtered, start_dt, end_dt)
-            '''
             plot_sw_radiation(df_filtered, start_dt, end_dt)
             plot_temperature_humidity(df_filtered, start_dt, end_dt)
             plot_wind(df_filtered, start_dt, end_dt)
