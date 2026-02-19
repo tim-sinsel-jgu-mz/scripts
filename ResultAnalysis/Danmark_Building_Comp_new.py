@@ -9,8 +9,8 @@ from sklearn.metrics import mean_squared_error, r2_score
 
 # --- PLOT STYLE ---
 plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
-plt.rcParams['font.size'] = 10
+plt.rcParams['font.sans-serif'] = ['Arial']
+plt.rcParams['font.size'] = 12
 plt.rcParams['lines.linewidth'] = 1.0 
 plt.rcParams['axes.linewidth'] = 1.0
 plt.rcParams['xtick.direction'] = 'in'
@@ -77,7 +77,6 @@ def load_envimet_receptors(data_directory: str, roof_base_height: float, label: 
             # Sanity Check
             df = df[(df['Temperature'] > -40.0) & (df['Temperature'] < 60.0)]
 
-            # LOGIK: ROOF vs FASSADE
             if loc_raw == 'ROOF':
                 df['Location'] = loc_raw
                 df['Distance'] = (df['z'] - roof_base_height).round(2)
@@ -87,7 +86,7 @@ def load_envimet_receptors(data_directory: str, roof_base_height: float, label: 
                 df = df[mask_z]
                 if df.empty: continue
                 
-                # Mittelwert über Höhen (eliminiert Duplikate und glättet Vertikal-Gradient)
+                # Mittelwert über Höhen
                 df = df.groupby('DateTime')['Temperature'].mean().reset_index()
                 
                 df['Location'] = loc_raw
@@ -102,13 +101,7 @@ def load_envimet_receptors(data_directory: str, roof_base_height: float, label: 
     if not all_dfs: return pd.DataFrame()
     
     df_total = pd.concat(all_dfs, ignore_index=True)
-    # Deduplizierung
     df_unique = df_total.groupby(['DateTime', 'Location', 'Distance', 'z'], as_index=False)['Temperature'].mean()
-    
-    try:
-        csv_path = os.path.join(out_dir, f'DEBUG_ModelData_{label}.csv')
-        df_unique.to_csv(csv_path, index=False)
-    except: pass
     
     return df_unique
 
@@ -124,7 +117,6 @@ def load_measurements(file_path: str, out_dir: str) -> pd.DataFrame:
     df.rename(columns={dt_col: 'DateTime'}, inplace=True)
     df['DateTime'] = pd.to_datetime(df['DateTime'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
     
-    # Time Fix +3 min
     df['DateTime'] = df['DateTime'] + pd.Timedelta(minutes=3)
     df['DateTime'] = df['DateTime'].dt.round('min')
     
@@ -156,11 +148,6 @@ def load_measurements(file_path: str, out_dir: str) -> pd.DataFrame:
     
     df_clean = df.dropna(subset=['Location', 'Distance', 'Temperature'])
     df_clean = df_clean.groupby(['DateTime', 'Location', 'Distance'], as_index=False)['Temperature'].mean()
-    
-    try:
-        csv_path = os.path.join(out_dir, 'DEBUG_MeasData.csv')
-        df_clean.to_csv(csv_path, index=False)
-    except: pass
     
     return df_clean
 
@@ -250,7 +237,6 @@ def get_series_meas(df, location, dist_key):
 def calc_stats_safe(s_meas, s_model):
     try:
         s_meas_clean = s_meas.dropna()
-        # Drop NaNs aus Modell (falls durch Glättung Ränder fehlen)
         s_model_clean = s_model.dropna()
         
         if s_meas_clean.empty or s_model_clean.empty: return np.nan, np.nan
@@ -264,86 +250,85 @@ def calc_stats_safe(s_meas, s_model):
     except:
         return np.nan, np.nan
 
-def run_plotting(df_meas, df_m1, df_m2, out_dir):
-    print("\n--- Erstelle Plots ---")
+def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
+    """Generiert eine Figure mit n Subplots untereinander."""
+    n_plots = len(plot_configs)
+    # Höhe anpassen: ca 3-3.5 inch pro Plot
+    fig, axes = plt.subplots(n_plots, 1, figsize=(10, n_plots * 3.5), constrained_layout=True)
     
-    fig, axes = plt.subplots(7, 1, figsize=(10, 24), constrained_layout=True)
+    if n_plots == 1: axes = [axes] # Fallback für Einzeiler
     
-    pairs = [
-        ('NORTH', 'NORTH'),
-        ('ROOF', 'ROOF'),
-        ('SOUTH1', 'SOUTH2'),
-        ('SOUTH2', 'SOUTH1')
+    for i, config in enumerate(plot_configs):
+        ax = axes[i]
+        meas_loc = config['meas_loc']
+        mod_loc = config['mod_loc']
+        d_key = config['d_key']
+        
+        ts_meas = get_series_meas(df_meas, meas_loc, d_key)
+        ts_m1 = get_series_model(df_m1, mod_loc, d_key)
+        ts_m2 = get_series_model(df_m2, mod_loc, d_key)
+        
+        # Glättung NEW
+        if not ts_m2.empty:
+            ts_m2 = ts_m2.rolling(window=5, center=True, min_periods=1).mean()
+        
+        if not ts_meas.empty:
+            ax.plot(ts_meas.index, ts_meas, color='black', label='Meas', lw=1.0, alpha=0.8)
+        
+        stats_txt = []
+        
+        if not ts_m1.empty:
+            ax.plot(ts_m1.index, ts_m1, color='#1f77b4', label='V56', lw=1, alpha=0.8)
+            rmse, r2 = calc_stats_safe(ts_meas, ts_m1)
+            if not np.isnan(rmse): stats_txt.append(f"V56: $R^2$={r2:.2f}, RMSE={rmse:.2f} K")
+
+        if not ts_m2.empty:
+            ax.plot(ts_m2.index, ts_m2, color='#d62728', label='V59', lw=1, alpha=0.8)
+            rmse, r2 = calc_stats_safe(ts_meas, ts_m2)
+            if not np.isnan(rmse): stats_txt.append(f"V59: $R^2$={r2:.2f}, RMSE={rmse:.2f} K")
+        
+        # Titel
+        if meas_loc == 'ROOF':
+            title = "ROOF 1.0 m"
+        else:
+            lbl = "0.5 m" if d_key == 0.5 else "1.5 m"
+            title = f"{meas_loc} {lbl}" 
+
+        ax.set_title(title, fontweight='bold', loc='left', fontsize=10)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%Hh'))
+        ax.grid(True, linestyle=':', alpha=0.6)
+        ax.set_ylim(8, 27)
+        ax.set_ylabel("Temp. (°C)")
+        
+        if stats_txt:
+            t = "\n".join(stats_txt)
+            ax.text(0.98, 0.02, t, transform=ax.transAxes, ha='right', va='bottom', fontsize=8,
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#cccccc'))
+
+    plt.savefig(out_path, dpi=300)
+    print(f"Fertig! Gespeichert unter: {out_path}")
+    plt.close()
+
+def run_plotting_split(df_meas, df_m1, df_m2, out_dir):
+    print("\n--- Erstelle getrennte Plots ---")
+    
+    # 1. Konfiguration für ROOF & 1.5m
+    config_fig1 = [
+        {'meas_loc': 'ROOF',   'mod_loc': 'ROOF',   'd_key': 1.5},
+        {'meas_loc': 'NORTH',  'mod_loc': 'NORTH',  'd_key': 1.5},
+        {'meas_loc': 'SOUTH1', 'mod_loc': 'SOUTH2', 'd_key': 1.5},
+        {'meas_loc': 'SOUTH2', 'mod_loc': 'SOUTH1', 'd_key': 1.5}
     ]
-    dist_keys = [0.5, 1.5] 
-    
-    plot_idx = 0
-    
-    for meas_loc, mod_loc in pairs:
-        for d_key in dist_keys:
-            if meas_loc == 'ROOF' and d_key == 0.5: continue
-            
-            ax = axes[plot_idx]
-            plot_idx += 1
-            
-            ts_meas = get_series_meas(df_meas, meas_loc, d_key)
-            ts_m1 = get_series_model(df_m1, mod_loc, d_key)
-            ts_m2 = get_series_model(df_m2, mod_loc, d_key)
-            
-            # --- GLÄTTUNG FÜR NEW (V59) ---
-            # Rolling Mean: window=5 (bei 5min Daten = 25min), center=True
-            if not ts_m2.empty:
-                ts_m2 = ts_m2.rolling(window=5, center=True, min_periods=1).mean()
-            
-            # Debug Output
-            label_dist = "05" if d_key == 0.5 else "15"
-            debug_name = f"{meas_loc}_{label_dist}"
-            
-            if not ts_meas.empty:
-                ts_meas.to_csv(os.path.join(out_dir, f"DEBUG_Plot_{debug_name}_Meas.csv"), header=["Temperature"])
-                ax.plot(ts_meas.index, ts_meas, color='black', label='Meas', lw=1.0, alpha=0.8)
-            
-            stats_txt = []
-            
-            # V56
-            if not ts_m1.empty:
-                ts_m1.to_csv(os.path.join(out_dir, f"DEBUG_Plot_{debug_name}_V56.csv"), header=["Temperature"])
-                ax.plot(ts_m1.index, ts_m1, color='#1f77b4', label='V56', lw=1, alpha=0.8)
-                rmse, r2 = calc_stats_safe(ts_meas, ts_m1)
-                if not np.isnan(rmse): 
-                    stats_txt.append(f"V56: $R^2$={r2:.2f}, RMSE={rmse:.2f}")
-
-            # New (Geglättet)
-            if not ts_m2.empty:
-                ts_m2.to_csv(os.path.join(out_dir, f"DEBUG_Plot_{debug_name}_NEW_Smoothed.csv"), header=["Temperature"])
-                ax.plot(ts_m2.index, ts_m2, color='#d62728', label='V59', lw=1, alpha=0.8)
-                rmse, r2 = calc_stats_safe(ts_meas, ts_m2)
-                if not np.isnan(rmse): 
-                    stats_txt.append(f"V59: $R^2$={r2:.2f}, RMSE={rmse:.2f}")
-            
-            if meas_loc == 'ROOF':
-                title = "ROOF 1.0 m"
-            else:
-                lbl = "0.5 m" if d_key == 0.5 else "1.5 m"
-                title = f"{meas_loc} {lbl}" 
-
-            ax.set_title(title, fontweight='bold', loc='left', fontsize=10)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%Hh'))
-            ax.grid(True, linestyle=':', alpha=0.6)
-            
-            ax.set_ylim(8, 27)
-            ax.set_ylabel("Temp. (°C)")
-            
-            if stats_txt:
-                t = "\n".join(stats_txt)
-                ax.text(0.98, 0.02, t, transform=ax.transAxes, ha='right', va='bottom', fontsize=8,
-                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#cccccc'))
-
-    fpath = os.path.join(out_dir, 'Validation_Comparison.png')
-    plt.savefig(fpath, dpi=300)
-    fpath = os.path.join(out_dir, 'Validation_Comparison.svg')
-    plt.savefig(fpath)
-    print(f"Fertig! Gespeichert unter: {fpath}")
+    create_figure(config_fig1, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_High_Level.png'))
+    create_figure(config_fig1, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_High_Level.svg'))
+    # 2. Konfiguration für 0.5m
+    config_fig2 = [
+        {'meas_loc': 'NORTH',  'mod_loc': 'NORTH',  'd_key': 0.5},
+        {'meas_loc': 'SOUTH1', 'mod_loc': 'SOUTH2', 'd_key': 0.5},
+        {'meas_loc': 'SOUTH2', 'mod_loc': 'SOUTH1', 'd_key': 0.5}
+    ]
+    create_figure(config_fig2, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_Low_Level.png'))
+    create_figure(config_fig2, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_Low_Level.svg'))
 
 if __name__ == "__main__":
     dir_v1 = r'Y:\Danmark_Building\Danmark_Building_Validation_Long_V56\receptors'
@@ -358,6 +343,6 @@ if __name__ == "__main__":
     d_meas = load_measurements(meas_file, out_dir)
     
     if not d_meas.empty:
-        run_plotting(d_meas, d_m1, d_m2, out_dir)
+        run_plotting_split(d_meas, d_m1, d_m2, out_dir)
     else:
         print("Abbruch: Keine Messdaten.")
