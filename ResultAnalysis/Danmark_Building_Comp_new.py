@@ -238,29 +238,31 @@ def get_series_meas(df, location, dist_key):
         
     return final_series
 
-def calc_stats_safe(s_meas, s_model):
+def get_aligned_data(s_meas, s_model):
+    """Hilfsfunktion, um Mess- und Modelldaten zeitlich für Scatter-Plots abzugleichen."""
     try:
         s_meas_clean = s_meas.dropna()
         s_model_clean = s_model.dropna()
-        
-        if s_meas_clean.empty or s_model_clean.empty: return np.nan, np.nan
+        if s_meas_clean.empty or s_model_clean.empty: 
+            return None, None
         
         s_model_aligned = s_model_clean.reindex(s_meas_clean.index, method='nearest', tolerance=pd.Timedelta('30min'))
         mask = s_model_aligned.notna()
-        y_true = s_meas_clean[mask]
-        y_pred = s_model_aligned[mask]
-        if len(y_true) < 5: return np.nan, np.nan
-        return np.sqrt(mean_squared_error(y_true, y_pred)), r2_score(y_true, y_pred)
+        return s_meas_clean[mask].values, s_model_aligned[mask].values
     except:
+        return None, None
+
+def calc_stats_safe(s_meas, s_model):
+    x, y = get_aligned_data(s_meas, s_model)
+    if x is None or len(x) < 5: 
         return np.nan, np.nan
+    return np.sqrt(mean_squared_error(x, y)), r2_score(x, y)
 
 def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
-    """Generiert eine Figure mit n Subplots untereinander."""
+    """Generiert eine Figure mit n Subplots untereinander (Zeitserien)."""
     n_plots = len(plot_configs)
-    # Höhe anpassen: ca 3-3.5 inch pro Plot
     fig, axes = plt.subplots(n_plots, 1, figsize=(10, n_plots * 3.5), constrained_layout=True)
-    
-    if n_plots == 1: axes = [axes] # Fallback für Einzeiler
+    if n_plots == 1: axes = [axes]
     
     for i, config in enumerate(plot_configs):
         ax = axes[i]
@@ -272,7 +274,6 @@ def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
         ts_m1 = get_series_model(df_m1, mod_loc, d_key)
         ts_m2 = get_series_model(df_m2, mod_loc, d_key)
         
-        # Glättung NEW
         if not ts_m2.empty:
             ts_m2 = ts_m2.rolling(window=5, center=True, min_periods=1).mean()
         
@@ -284,31 +285,23 @@ def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
         if not ts_m1.empty:
             ax.plot(ts_m1.index, ts_m1, color='#1f77b4', label='V56', lw=1, alpha=0.8)
             rmse, r2 = calc_stats_safe(ts_meas, ts_m1)
-            if not np.isnan(rmse): stats_txt.append(f"V56: $R^2$={r2:.2f}, RMSE={rmse:.2f} K")
+            if not np.isnan(rmse): stats_txt.append(f"V56: R²={r2:.2f}, RMSE={rmse:.2f} K")
 
         if not ts_m2.empty:
             ax.plot(ts_m2.index, ts_m2, color='#d62728', label='V59', lw=1, alpha=0.8)
             rmse, r2 = calc_stats_safe(ts_meas, ts_m2)
-            if not np.isnan(rmse): stats_txt.append(f"V59: $R^2$={r2:.2f}, RMSE={rmse:.2f} K")
+            if not np.isnan(rmse): stats_txt.append(f"V59: R²={r2:.2f}, RMSE={rmse:.2f} K")
         
-        # Titel
-        if meas_loc == 'ROOF':
-            title = "ROOF 1.0 m"
-        else:
-            lbl = "0.5 m" if d_key == 0.5 else "1.5 m"
-            title = f"{meas_loc} {lbl}" 
-
+        title = "ROOF 1.0 m" if meas_loc == 'ROOF' else f"{meas_loc} {'0.5 m' if d_key == 0.5 else '1.5 m'}" 
         ax.set_title(title, fontweight='bold', loc='left', fontsize=12)
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m'))
         
-        # --- Updated Styling ---
         ax.grid(True, color='#DDDDDD', linestyle='--', linewidth=0.2)
         for spine in ax.spines.values():
             spine.set_color('#DDDDDD')
             spine.set_linewidth(1.0)
             
         ax.tick_params(axis='both', which='major', colors='black', labelsize=12, direction='in', length=5)
-        
         ax.set_ylim(8, 27)
         ax.set_ylabel("Temp. [°C]", fontsize=12, fontweight='bold')
         
@@ -318,7 +311,161 @@ def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
                     bbox=dict(boxstyle='square,pad=0.3', facecolor='white', edgecolor='#DDDDDD', linewidth=1))
 
     plt.savefig(out_path, dpi=300)
-    print(f"Fertig! Gespeichert unter: {out_path}")
+    print(f"Zeitreihe gespeichert unter: {out_path}")
+    plt.close()
+
+def create_regression_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
+    """Generiert eine Figure mit n Subplots untereinander (Regression Measured vs Modelled)."""
+    n_plots = len(plot_configs)
+    fig, axes = plt.subplots(n_plots, 1, figsize=(6, n_plots * 5), constrained_layout=True)
+    if n_plots == 1: axes = [axes]
+    
+    for i, config in enumerate(plot_configs):
+        ax = axes[i]
+        meas_loc = config['meas_loc']
+        mod_loc = config['mod_loc']
+        d_key = config['d_key']
+        
+        ts_meas = get_series_meas(df_meas, meas_loc, d_key)
+        ts_m1 = get_series_model(df_m1, mod_loc, d_key)
+        ts_m2 = get_series_model(df_m2, mod_loc, d_key)
+        
+        # 1:1 Perfekte Regression (Diagonale)
+        ax.plot([8, 27], [8, 27], color='black', linestyle='--', linewidth=1.5, label='1:1 Line')
+        
+        stats_txt = []
+        
+        # V56 Plotting & Regression
+        if not ts_m1.empty:
+            x, y = get_aligned_data(ts_meas, ts_m1)
+            if x is not None and len(x) > 5:
+                ax.scatter(x, y, alpha=0.4, color='#1f77b4', s=15, label='V56 Data')
+                m, b = np.polyfit(x, y, 1)
+                ax.plot(np.unique(x), np.poly1d((m, b))(np.unique(x)), color='#1f77b4', linewidth=2, label='V56 Fit')
+                rmse, r2 = np.sqrt(mean_squared_error(x, y)), r2_score(x, y)
+                stats_txt.append(f"V56: y = {m:.2f}x + {b:.2f} | R²={r2:.2f}")
+
+        # V59/NEW Plotting & Regression
+        if not ts_m2.empty:
+            ts_m2 = ts_m2.rolling(window=5, center=True, min_periods=1).mean()
+            x, y = get_aligned_data(ts_meas, ts_m2)
+            if x is not None and len(x) > 5:
+                ax.scatter(x, y, alpha=0.4, color='#d62728', s=15, label='V59 Data')
+                m, b = np.polyfit(x, y, 1)
+                ax.plot(np.unique(x), np.poly1d((m, b))(np.unique(x)), color='#d62728', linewidth=2, label='V59 Fit')
+                rmse, r2 = np.sqrt(mean_squared_error(x, y)), r2_score(x, y)
+                stats_txt.append(f"V59: y = {m:.2f}x + {b:.2f} | R²={r2:.2f}")
+        
+        title = "ROOF 1.0 m" if meas_loc == 'ROOF' else f"{meas_loc} {'0.5 m' if d_key == 0.5 else '1.5 m'}"
+        ax.set_title(title, fontweight='bold', loc='left', fontsize=12)
+        
+        ax.set_aspect('equal', adjustable='box')
+        ax.grid(True, color='#DDDDDD', linestyle='--', linewidth=0.2)
+        ax.set_xlim(8, 27)
+        ax.set_ylim(8, 27)
+        ax.tick_params(axis='both', which='major', colors='black', labelsize=12, direction='in', length=7)
+        ax.set_xlabel("Measured Temperature [°C]", fontsize=12, fontweight='bold')
+        ax.set_ylabel("Modelled Temperature [°C]", fontsize=12, fontweight='bold')
+        #ax.legend(loc='upper left', fontsize=10, frameon=True)
+        
+        if stats_txt:
+            t = "\n".join(stats_txt)
+            ax.text(0.98, 0.05, t, transform=ax.transAxes, ha='right', va='bottom', fontsize=12,
+                    bbox=dict(boxstyle='square,pad=0.3', facecolor='white', edgecolor='#DDDDDD', linewidth=1))
+
+    plt.savefig(out_path, dpi=300)
+    print(f"Regression gespeichert unter: {out_path}")
+    plt.close()
+
+def create_aggregated_regression_figure(all_configs, df_meas, df_m1, df_m2, out_path_base):
+    """Erstellt einen aggregierten Regressionsplot über alle Distanzen & Sensoren hinweg."""
+    
+    # 1 Row, 2 Columns (V56 Links, V59 Rechts)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6), constrained_layout=True)
+    
+    all_x_m1, all_y_m1 = [], []
+    all_x_m2, all_y_m2 = [], []
+    
+    # Iteriere über alle Konfigurationen um ein großes Set von Arrays aufzubauen
+    for config in all_configs:
+        meas_loc = config['meas_loc']
+        mod_loc = config['mod_loc']
+        d_key = config['d_key']
+        
+        ts_meas = get_series_meas(df_meas, meas_loc, d_key)
+        ts_m1 = get_series_model(df_m1, mod_loc, d_key)
+        ts_m2 = get_series_model(df_m2, mod_loc, d_key)
+        
+        if not ts_m2.empty:
+            ts_m2 = ts_m2.rolling(window=5, center=True, min_periods=1).mean()
+            
+        if not ts_m1.empty:
+            x1, y1 = get_aligned_data(ts_meas, ts_m1)
+            if x1 is not None and len(x1) > 0:
+                all_x_m1.extend(x1.tolist())
+                all_y_m1.extend(y1.tolist())
+                
+        if not ts_m2.empty:
+            x2, y2 = get_aligned_data(ts_meas, ts_m2)
+            if x2 is not None and len(x2) > 0:
+                all_x_m2.extend(x2.tolist())
+                all_y_m2.extend(y2.tolist())
+
+    # --- PLOT 1: V56 Aggregated ---
+    ax1 = axes[0]
+    ax1.plot([8, 27], [8, 27], color='black', linestyle='--', linewidth=1, alpha=0.5)
+    
+    if all_x_m1:
+        x, y = np.array(all_x_m1), np.array(all_y_m1)
+        # alpha reduzierter aufgrund der großen Datenmenge
+        ax1.scatter(x, y, alpha=0.25, color='#1f77b4', s=15, label='V56')
+        m, b = np.polyfit(x, y, 1)
+        ax1.plot(np.unique(x), np.poly1d((m, b))(np.unique(x)), color='black', linewidth=2, alpha=0.8, label='Lin. Regression V56')
+        
+        rmse, r2 = np.sqrt(mean_squared_error(x, y)), r2_score(x, y)
+        ax1.text(0.98, 0.05, f"y = {m:.2f}x + {b:.2f}\nR²={r2:.2f}\nRMSE={rmse:.2f} K", 
+                 transform=ax1.transAxes, ha='right', va='bottom', fontsize=12,
+                 bbox=dict(boxstyle='square,pad=0.3', facecolor='white', edgecolor='#DDDDDD', linewidth=1))
+
+    ax1.set_title("V56", fontweight='bold', loc='left', fontsize=12)
+    ax1.set_aspect('equal', adjustable='box')
+    ax1.grid(True, color='#DDDDDD', linestyle='--', linewidth=0.2)
+    ax1.set_xlim(8, 27)
+    ax1.set_ylim(8, 27)
+    ax1.tick_params(axis='both', which='major', colors='black', labelsize=12, direction='in', length=7)
+    ax1.set_xlabel("Measured Temperature [°C]", fontsize=12, fontweight='bold')
+    ax1.set_ylabel("Modelled Temperature [°C]", fontsize=12, fontweight='bold')
+    #ax1.legend(loc='upper left', fontsize=10, frameon=True)
+
+    # --- PLOT 2: V59 Aggregated ---
+    ax2 = axes[1]
+    ax2.plot([8, 27], [8, 27], color='black', linestyle='--', linewidth=1, alpha=0.5)
+    
+    if all_x_m2:
+        x, y = np.array(all_x_m2), np.array(all_y_m2)
+        ax2.scatter(x, y, alpha=0.25, color='#d62728', s=15, label='V59')
+        m, b = np.polyfit(x, y, 1)
+        ax2.plot(np.unique(x), np.poly1d((m, b))(np.unique(x)), color='black', linewidth=2, alpha=0.8, label='Lin. Regression V59')
+        
+        rmse, r2 = np.sqrt(mean_squared_error(x, y)), r2_score(x, y)
+        ax2.text(0.98, 0.05, f"y = {m:.2f}x + {b:.2f}\nR²={r2:.2f}\nRMSE={rmse:.2f} K", 
+                 transform=ax2.transAxes, ha='right', va='bottom', fontsize=12,
+                 bbox=dict(boxstyle='square,pad=0.3', facecolor='white', edgecolor='#DDDDDD', linewidth=1))
+
+    ax2.set_title("V59", fontweight='bold', loc='left', fontsize=12)
+    ax2.set_aspect('equal', adjustable='box')
+    ax2.grid(True, color='#DDDDDD', linestyle='--', linewidth=0.2)
+    ax2.set_xlim(8, 27)
+    ax2.set_ylim(8, 27)
+    ax2.tick_params(axis='both', which='major', colors='black', labelsize=12, direction='in', length=7)    
+    ax2.set_xlabel("Measured Temperature [°C]", fontsize=12, fontweight='bold')
+    ax2.set_ylabel("Modelled Temperature [°C]", fontsize=12, fontweight='bold')
+    #ax2.legend(loc='upper left', fontsize=10, frameon=True)
+
+    # Speichern der aggregierten Plots in PNG und SVG
+    plt.savefig(f"{out_path_base}.png", dpi=300)
+    plt.savefig(f"{out_path_base}.svg")
+    print(f"Aggregierte Regression gespeichert unter: {out_path_base}.png und {out_path_base}.svg")
     plt.close()
 
 def run_plotting_split(df_meas, df_m1, df_m2, out_dir):
@@ -331,16 +478,30 @@ def run_plotting_split(df_meas, df_m1, df_m2, out_dir):
         {'meas_loc': 'SOUTH1', 'mod_loc': 'SOUTH2', 'd_key': 1.5},
         {'meas_loc': 'SOUTH2', 'mod_loc': 'SOUTH1', 'd_key': 1.5}
     ]
-    create_figure(config_fig1, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_High_Level.png'))
-    create_figure(config_fig1, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_High_Level.svg'))
+    # Zeitreihen
+    create_figure(config_fig1, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_High_Level_TS.png'))
+    create_figure(config_fig1, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_High_Level_TS.svg'))
+    # Einzelne Regressionen
+    create_regression_figure(config_fig1, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_High_Level_Reg.png'))
+    create_regression_figure(config_fig1, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_High_Level_Reg.svg'))
+    
     # 2. Konfiguration für 0.5m
     config_fig2 = [
         {'meas_loc': 'NORTH',  'mod_loc': 'NORTH',  'd_key': 0.5},
         {'meas_loc': 'SOUTH1', 'mod_loc': 'SOUTH2', 'd_key': 0.5},
         {'meas_loc': 'SOUTH2', 'mod_loc': 'SOUTH1', 'd_key': 0.5}
     ]
-    create_figure(config_fig2, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_Low_Level.png'))
-    create_figure(config_fig2, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_Low_Level.svg'))
+    # Zeitreihen
+    create_figure(config_fig2, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_Low_Level_TS.png'))
+    create_figure(config_fig2, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_Low_Level_TS.svg'))
+    # Einzelne Regressionen
+    create_regression_figure(config_fig2, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_Low_Level_Reg.png'))
+    create_regression_figure(config_fig2, df_meas, df_m1, df_m2, os.path.join(out_dir, 'Validation_Low_Level_Reg.svg'))
+
+    # 3. Aggregierte Regression über alle Konfigurationen
+    all_configs = config_fig1 + config_fig2
+    agg_out_base = os.path.join(out_dir, 'Validation_Aggregated_Reg')
+    create_aggregated_regression_figure(all_configs, df_meas, df_m1, df_m2, agg_out_base)
 
 if __name__ == "__main__":
     dir_v1 = r'Y:\Danmark_Building\Danmark_Building_Validation_Long_V56\receptors'
