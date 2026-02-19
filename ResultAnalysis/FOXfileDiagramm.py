@@ -46,21 +46,14 @@ VAR_STYLES = {
 
 # Labels
 AXIS_LABELS = {
-    'x': "Time",
-    'y_sw_direct': "Direct Shortwave Radiation [W/m²]",
-    'y_sw_diffuse': "Diffuse Shortwave Radiation [W/m²]",
     'y_sw': "Shortwave Radiation [W/m²]",
-    'y_lw': "Longwave Radiation [W/m²]",
     'y_temp': "Air Temperature [°C]",
     'y_q': "Specific Humidity [g/kg]",
     'y_wind_speed': "Wind Speed [m/s]",
     'y_wind_direction': "Wind Direction [°]",
-    'title_sw_direct': 'Direct Shortwave Radiation',
-    'title_sw_diffuse': 'Diffuse Shortwave Radiation',
-    'title_lw': 'Longwave Radiation',
+    'title_sw_direct_diffuse': 'Direct and Diffuse Shortwave Radiation',
     'title_temp_humidity': 'Air Temperature and Specific Humidity',
-    'title_wind': 'Wind Conditions',
-    'title_sw_direct_diffuse': 'Direct and Diffuse Shortwave Radiation'
+    'title_wind': 'Wind Conditions'
 }
 
 # --------------------------
@@ -78,39 +71,29 @@ def load_data(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # Access the list of timesteps
         timestep_list = data.get('timestepList', [])
         
         if not timestep_list:
             print("Error: 'timestepList' not found or empty in JSON.")
             return None
 
-        # Process the list into a flat structure
         processed_data = []
         for item in timestep_list:
             record = {}
-            
-            # Basic info
             record['Date'] = item.get('date')
             record['Time'] = item.get('time')
-            
-            # Radiation
             record['directrad'] = item.get('swDir', 0)
             record['diffuserad'] = item.get('swDif', 0)
             record['lw'] = item.get('lwRad', 0)
             
-            # Profiles - Extract value from first level (height 2m or 10m)
-            # Temperature (tProfile)
             t_prof = item.get('tProfile', [])
             if t_prof:
                 record['at'] = t_prof[0].get('value') # Kelvin
                 
-            # Specific Humidity (qProfile)
             q_prof = item.get('qProfile', [])
             if q_prof:
                 record['q'] = q_prof[0].get('value') # g/kg
                 
-            # Wind (windProfile)
             w_prof = item.get('windProfile', [])
             if w_prof:
                 record['ws'] = w_prof[0].get('wSpdValue')
@@ -118,22 +101,14 @@ def load_data(file_path):
             
             processed_data.append(record)
 
-        # Create DataFrame
         df = pd.DataFrame(processed_data)
-        
-        # Create DateTime
         df['DateTime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
-        
-        # Clean up
         df = df.dropna(subset=['DateTime'])
         print(f"Successfully loaded {len(df)} rows.")
         return df
 
-    except json.JSONDecodeError:
-        print(f"Error: Failed to decode JSON.")
-        return None
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        print(f"Error loading data: {e}")
         return None
 
 def filter_data(df, start_datetime, end_datetime):
@@ -144,6 +119,7 @@ def format_plot(ax, y_lim=None, num_yticks=None, y_label=None, x_lim=None, ytick
     if y_lim: ax.set_ylim(y_lim)
     if x_lim: ax.set_xlim(x_lim)
         
+    # Updated Datetime formatting: "Day-Month"
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%m"))
     ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
     ax.tick_params(axis='x', which='major', length=5, direction='in', labelsize=TICK_LABEL_SIZE)
@@ -156,19 +132,17 @@ def format_plot(ax, y_lim=None, num_yticks=None, y_label=None, x_lim=None, ytick
         ax.tick_params(axis='y', which='major', length=3, direction='in', labelsize=TICK_LABEL_SIZE)
         
     ax.grid(SHOW_GRID, **GRID_STYLE)
+    
     plt.setp(ax.get_xticklabels(), rotation=0, ha='center')
     
     if y_label:
         ax.set_ylabel(y_label, fontsize=AXIS_LABEL_SIZE, fontweight='bold')
-    #ax.set_xlabel(AXIS_LABELS['x'], fontsize=AXIS_LABEL_SIZE, fontweight='bold')
 
 # --------------------------
 # Plotting Functions
 # --------------------------
 
-def plot_sw_radiation(df, start_dt, end_dt):
-    fig, axdir = plt.subplots(figsize=(10, 6))
-
+def plot_sw_radiation(df, start_dt, end_dt, axdir):
     if 'directrad' in df.columns:
         l1 = axdir.plot(df['DateTime'], df['directrad'], 
                       color=STYLE_CONFIG['color'], 
@@ -182,11 +156,11 @@ def plot_sw_radiation(df, start_dt, end_dt):
                           linewidth=STYLE_CONFIG['linewidth'],
                           label='Diffuse')
 
-    # Start at 0, break at 200 W/m² increments (5 ticks)
     sw_ylim = [0, 800]
     sw_ticks = np.arange(0, 801, 200)
 
     format_plot(axdir, y_lim=sw_ylim, yticks=sw_ticks, y_label=AXIS_LABELS['y_sw'], x_lim=[start_dt, end_dt])
+    #axdir.set_title(AXIS_LABELS['title_sw_direct_diffuse'], fontweight='bold', loc='left', fontsize=12)
 
     try:
         lns = l1 + l2
@@ -195,12 +169,8 @@ def plot_sw_radiation(df, start_dt, end_dt):
     except:
         pass    
 
-    plt.savefig(r"D:\CompPlotsDanmark\FOX\direct_and_diffuse_sw_radiation.svg", format='svg', bbox_inches='tight')
-    plt.close()
 
-
-def plot_temperature_humidity(df, start_dt, end_dt):
-    fig, ax_temp = plt.subplots(figsize=(10, 6))
+def plot_temperature_humidity(df, start_dt, end_dt, ax_temp):
     ax_humidity = ax_temp.twinx()
     
     if 'at' in df.columns:
@@ -225,18 +195,17 @@ def plot_temperature_humidity(df, start_dt, end_dt):
     format_plot(ax_temp, y_lim=temp_ylim, yticks=temp_ticks, y_label=AXIS_LABELS['y_temp'], x_lim=[start_dt, end_dt])
     format_plot(ax_humidity, y_lim=humidity_ylim, yticks=humidity_ticks, y_label=AXIS_LABELS['y_q'])
     
+    #ax_temp.set_title(AXIS_LABELS['title_temp_humidity'], fontweight='bold', loc='left', fontsize=12)
+    
     try:
         lns = l1 + l2
         labs = [l.get_label() for l in lns]
         ax_temp.legend(lns, labs, loc='upper left', frameon=False, prop={'size': LEGEND_FONT_SIZE})
     except:
         pass
-        
-    plt.savefig(r"D:\CompPlotsDanmark\FOX\temperature_humidity.svg", format='svg', bbox_inches='tight')
-    plt.close()
 
-def plot_wind(df, start_dt, end_dt):
-    fig, ax_speed = plt.subplots(figsize=(10, 6))
+
+def plot_wind(df, start_dt, end_dt, ax_speed):
     ax_direction = ax_speed.twinx()
     
     if 'ws' in df.columns:
@@ -252,25 +221,24 @@ def plot_wind(df, start_dt, end_dt):
                           linewidth=STYLE_CONFIG['linewidth'],
                           label='Wind Direction')
 
-    # Changed max wind speed to 6 to generate 7 clean ticks (0, 1, 2, 3, 4, 5, 6)
-    speed_ylim = [0, 3.6] 
+    speed_ylim = [0, 6] 
     direction_ylim = [0, 360]
     
     speed_ticks = np.linspace(speed_ylim[0], speed_ylim[1], 7)
-    direction_ticks = np.arange(0, 361, 60) # 7 Ticks: 0, 60, 120, 180, 240, 300, 360
+    direction_ticks = np.arange(0, 361, 60)
 
     format_plot(ax_speed, y_lim=speed_ylim, yticks=speed_ticks, y_label=AXIS_LABELS['y_wind_speed'], x_lim=[start_dt, end_dt])
     format_plot(ax_direction, y_lim=direction_ylim, yticks=direction_ticks, y_label=AXIS_LABELS['y_wind_direction'])
     
+    #ax_speed.set_title(AXIS_LABELS['title_wind'], fontweight='bold', loc='left', fontsize=12)
+    
     try:
         lns = l1 + l2
         labs = [l.get_label() for l in lns]
-        ax_speed.legend(lns, labs, loc='lower right', frameon=False, prop={'size': LEGEND_FONT_SIZE})
+        ax_speed.legend(lns, labs, loc='upper right', frameon=False, prop={'size': LEGEND_FONT_SIZE})
     except:
         pass
 
-    plt.savefig(r"D:\CompPlotsDanmark\FOX\wind.svg", format='svg', bbox_inches='tight')
-    plt.close()
 
 def main():
     df = load_data(FILE_PATH)
@@ -283,10 +251,18 @@ def main():
         if df_filtered.empty:
             print(f"No data found in the time range {START_DATETIME} to {END_DATETIME}")
         else:
-            plot_sw_radiation(df_filtered, start_dt, end_dt)
-            plot_temperature_humidity(df_filtered, start_dt, end_dt)
-            plot_wind(df_filtered, start_dt, end_dt)
-            print("All plots created successfully.")
+            # Create a single figure with 3 subplots stacked vertically
+            fig, axes = plt.subplots(3, 1, figsize=(10, 10.5), constrained_layout=True)
+
+            plot_temperature_humidity(df_filtered, start_dt, end_dt, axes[0])            
+            plot_sw_radiation(df_filtered, start_dt, end_dt, axes[1])
+            plot_wind(df_filtered, start_dt, end_dt, axes[2])
+            
+            # Save the combined plot
+            out_path = r"D:\CompPlotsDanmark\FOX\combined_meteorology.svg"
+            plt.savefig(out_path, format='svg', bbox_inches='tight')
+            plt.close()
+            print(f"Combined plot created successfully at {out_path}.")
 
 if __name__ == "__main__":
     main()
