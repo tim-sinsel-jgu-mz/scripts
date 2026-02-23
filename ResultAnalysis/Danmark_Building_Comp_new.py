@@ -258,8 +258,12 @@ def calc_stats_safe(s_meas, s_model):
         return np.nan, np.nan
     return np.sqrt(mean_squared_error(x, y)), r2_score(x, y)
 
-def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
-    """Generiert eine Figure mit n Subplots untereinander (Zeitserien)."""
+def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path, date_fmt='%d-%m', y_limits=(8, 27), title_suffix="", highlight_range=None):
+    """
+    Generiert eine Figure mit n Subplots (Zeitserien).
+    Neu:
+    - highlight_range: Tuple (start_dt, end_dt) für einen farbigen Hintergrundbereich (Schatten).
+    """
     n_plots = len(plot_configs)
     fig, axes = plt.subplots(n_plots, 1, figsize=(10, n_plots * 3.5), constrained_layout=True)
     if n_plots == 1: axes = [axes]
@@ -270,6 +274,11 @@ def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
         mod_loc = config['mod_loc']
         d_key = config['d_key']
         
+        # --- NEU: Schatten zeichnen (im Hintergrund) ---
+        if highlight_range is not None:
+            # color='#FFFFE0' ist ein helles "LightYellow"
+            ax.axvspan(highlight_range[0], highlight_range[1], color='#FFFFE0', alpha=0.6, lw=0)
+
         ts_meas = get_series_meas(df_meas, meas_loc, d_key)
         ts_m1 = get_series_model(df_m1, mod_loc, d_key)
         ts_m2 = get_series_model(df_m2, mod_loc, d_key)
@@ -292,17 +301,17 @@ def create_figure(plot_configs, df_meas, df_m1, df_m2, out_path):
             rmse, r2 = calc_stats_safe(ts_meas, ts_m2)
             if not np.isnan(rmse): stats_txt.append(f"V59: R²={r2:.2f}, RMSE={rmse:.2f} K")
         
-        title = "ROOF 1.0 m" if meas_loc == 'ROOF' else f"{meas_loc} {'0.5 m' if d_key == 0.5 else '1.5 m'}" 
-        ax.set_title(title, fontweight='bold', loc='left', fontsize=12)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m'))
+        # Titel & Achsen
+        base_title = "ROOF 1.0 m" if meas_loc == 'ROOF' else f"{meas_loc} {'0.5 m' if d_key == 0.5 else '1.5 m'}" 
+        full_title = f"{base_title} {title_suffix}"
+        ax.set_title(full_title, fontweight='bold', loc='left', fontsize=12)
+        
+        ax.xaxis.set_major_formatter(mdates.DateFormatter(date_fmt))
         
         ax.grid(True, color='#DDDDDD', linestyle='--', linewidth=0.2)
-        for spine in ax.spines.values():
-            spine.set_color('#DDDDDD')
-            spine.set_linewidth(1.0)
-            
         ax.tick_params(axis='both', which='major', colors='black', labelsize=12, direction='in', length=5)
-        ax.set_ylim(8, 27)
+        
+        ax.set_ylim(y_limits)
         ax.set_ylabel("Temp. [°C]", fontsize=12, fontweight='bold')
         
         if stats_txt:
@@ -503,6 +512,216 @@ def run_plotting_split(df_meas, df_m1, df_m2, out_dir):
     agg_out_base = os.path.join(out_dir, 'Validation_Aggregated_Reg')
     create_aggregated_regression_figure(all_configs, df_meas, df_m1, df_m2, agg_out_base)
 
+def create_profile_figure(df_meas, df_m1, df_m2, target_time, out_path):
+    """
+    Erstellt ein 2x2 Profil-Plot für einen Zeitpunkt. 
+    X-Achse geht nun bis 2.2m für alle Plots.
+    """
+    t_ts = pd.to_datetime(target_time)
+    
+    def get_profile(df, loc):
+        if df.empty: return pd.DataFrame()
+        # Zeitfilter
+        mask_time = df['DateTime'] == t_ts
+        d = df[mask_time & (df['Location'] == loc)].copy()
+        if d.empty: return pd.DataFrame()
+        
+        # Filter: Nur Punkte bis 2.5m (um sicher zu sein, dass 2.2m draufpasst)
+        d = d[d['Distance'] <= 2.5]
+        return d.sort_values('Distance')
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
+    sites = [
+        ('NORTH', axes[0, 0]), 
+        ('SOUTH1', axes[0, 1]), 
+        ('SOUTH2', axes[1, 0]), 
+        ('ROOF', axes[1, 1])
+    ]
+    
+    fig.suptitle(f"Temperature Profile @ {t_ts.strftime('%d.%m.%Y %H:%M')}", fontsize=14, fontweight='bold')
+
+    for loc, ax in sites:
+        p_meas = get_profile(df_meas, loc)
+        p_m1 = get_profile(df_m1, loc)
+        p_m2 = get_profile(df_m2, loc)
+        
+        # Plotting
+        if not p_meas.empty:
+            ax.plot(p_meas['Distance'], p_meas['Temperature'], 'o-', color='black', label='Meas', markersize=6, lw=1.5)
+        if not p_m1.empty:
+            ax.plot(p_m1['Distance'], p_m1['Temperature'], 's-', color='#1f77b4', label='V56', markersize=5, alpha=0.8)
+        if not p_m2.empty:
+            ax.plot(p_m2['Distance'], p_m2['Temperature'], '^-', color='#d62728', label='V59', markersize=5, alpha=0.8)
+
+        # Styling
+        ax.set_title(loc, fontweight='bold', fontsize=12)
+        ax.grid(True, color='#DDDDDD', linestyle='--', linewidth=0.5)
+        
+        xlabel = "Height above Roof [m]" if loc == 'ROOF' else "Distance to Wall [m]"
+        ax.set_xlabel(xlabel, fontsize=10)
+        ax.set_ylabel("Temperature [°C]", fontsize=10)
+        
+        # NEU: Limit fix auf 0 bis 2.2m
+        ax.set_xlim(0, 2.2)
+        
+        if loc == 'NORTH':
+            ax.legend(fontsize=10, frameon=True, facecolor='white', framealpha=1)
+
+    plt.savefig(out_path)
+    plt.savefig(out_path.replace('.png', '.svg'))
+    print(f"Profil-Plot gespeichert: {out_path}")
+    plt.close()
+
+def create_contour_figure(df_meas, df_m1, df_m2, location, out_path, mode='all'):
+    """
+    Erstellt Contour-Plots mit vertikaler Glättung und Tag/Nacht-Filter.
+    mode: 'all', 'day' (06:00-21:00), 'night' (21:00-06:00)
+    """
+    
+    def prep_grid(df, loc):
+        if df.empty: return None, None, None, None, None
+        
+        d = df[df['Location'] == loc].copy()
+        
+        # --- TIME FILTER ---
+        if mode == 'day':
+            d = d[(d['DateTime'].dt.hour >= 6) & (d['DateTime'].dt.hour < 21)]
+        elif mode == 'night':
+            d = d[(d['DateTime'].dt.hour >= 21) | (d['DateTime'].dt.hour < 6)]
+            
+        d = d[d['Distance'] <= 2.5] 
+        if d.empty: return None, None, None, None, None
+        
+        # Pivot & Temporal Interp
+        piv = d.pivot_table(index='DateTime', columns='Distance', values='Temperature')
+        
+        # Resample fügt Lücken für die ausgeblendeten Zeiten ein (z.B. Nacht bei mode='day')
+        # Das sorgt für saubere Trennung der Tage im Plot (weiße Streifen)
+        piv = piv.resample('10min').interpolate(method='time', limit=6)
+        
+        # CRASH FIX: Mindestens 2 Höhen benötigt
+        if piv.shape[1] < 2: return None, None, None, None, None
+        if piv.empty or piv.isna().all().all(): return None, None, None, None, None
+        
+        # Spatial Smoothing (Vertikale Interpolation)
+        try:
+            df_trans = piv.T 
+            fine_index = np.arange(df_trans.index.min(), df_trans.index.max() + 0.05, 0.05)
+            combined_index = df_trans.index.union(fine_index).sort_values()
+            df_trans = df_trans.reindex(combined_index).interpolate(method='index', limit_direction='both')
+            piv = df_trans.reindex(fine_index).T
+        except: pass
+
+        X, Y = np.meshgrid(mdates.date2num(piv.index), piv.columns)
+        return X, Y, piv.values.T, np.nanmin(piv.values), np.nanmax(piv.values)
+
+    X_m, Y_m, Z_m, min_m, max_m = prep_grid(df_meas, location)
+    X_1, Y_1, Z_1, min_1, max_1 = prep_grid(df_m1, location)
+    X_2, Y_2, Z_2, min_2, max_2 = prep_grid(df_m2, location)
+
+    mins = [m for m in [min_m, min_1, min_2] if m is not None and not np.isnan(m)]
+    maxs = [m for m in [max_m, max_1, max_2] if m is not None and not np.isnan(m)]
+    
+    if not mins: 
+        print(f"Keine validen Daten für {location} ({mode}), Plot wird übersprungen.")
+        return # Skip empty plots
+
+    vmin, vmax = min(mins), max(maxs)
+    if vmin == vmax: vmin -= 1; vmax += 1
+
+    levels = np.linspace(np.floor(vmin), np.ceil(vmax), 40)
+    fig, axes = plt.subplots(3, 1, figsize=(10, 12), constrained_layout=True, sharex=True)
+    
+    def do_plot(ax, X, Y, Z, title):
+        ax.set_ylabel("Distance [m]", fontweight='bold')
+        ax.set_title(title, fontweight='bold', loc='left')
+        
+        if X is not None:
+            cf = ax.contourf(X, Y, Z, levels=levels, cmap='RdYlBu_r', extend='both')
+            ax.grid(True, color='white', linestyle=':', alpha=0.3)
+            return cf
+        else:
+            # Fallback
+            ax.text(0.5, 0.5, "Not enough vertical data\n(Needs >1 height level)", 
+                    ha='center', va='center', transform=ax.transAxes, color='gray')
+            ax.set_yticks([])
+            return None
+
+    # Plotting
+    cf1 = do_plot(axes[0], X_m, Y_m, Z_m, f"Measured: {location} ({mode.upper()})")
+    do_plot(axes[1], X_1, Y_1, Z_1, f"Model V56: {location} ({mode.upper()})")
+    cf_last = do_plot(axes[2], X_2, Y_2, Z_2, f"Model V59: {location} ({mode.upper()})")
+
+    # X-Achse
+    axes[2].xaxis.set_major_formatter(mdates.DateFormatter('%d.%m %H:%M'))
+    axes[2].set_xlabel("Date / Time", fontweight='bold')
+    
+    # Colorbar
+    mappable = cf1 if cf1 else (cf_last if cf_last else None)
+    if mappable:
+        cbar = fig.colorbar(mappable, ax=axes, location='right', aspect=40, pad=0.02)
+        cbar.set_label("Temperature [°C]", fontsize=12)
+
+    plt.savefig(out_path)
+    print(f"Contour-Plot gespeichert: {out_path}")
+    plt.close()
+
+def run_single_day_plot(df_meas, df_m1, df_m2, out_dir):
+    print("\n--- Erstelle Single Day Plot (NORTH, 31.07.) ---")
+    
+    start_dt = pd.to_datetime("2022-07-31 00:00:00")
+    end_dt = pd.to_datetime("2022-08-01 00:00:00")
+    
+    # NEU: Definition des Zeitfensters für den gelben Schatten
+    shadow_start = pd.to_datetime("2022-07-31 05:00:00")
+    shadow_end   = pd.to_datetime("2022-07-31 06:00:00")
+    
+    def filter_time(df):
+        if df.empty: return df
+        mask = (df['DateTime'] >= start_dt) & (df['DateTime'] <= end_dt)
+        return df.loc[mask].copy()
+
+    d_meas_sub = filter_time(df_meas)
+    d_m1_sub = filter_time(df_m1)
+    d_m2_sub = filter_time(df_m2)
+    
+    if d_meas_sub.empty:
+        print("Warnung: Keine Daten für den gewählten Zeitraum gefunden.")
+        return
+
+    plot_config = [
+        {'meas_loc': 'NORTH', 'mod_loc': 'NORTH', 'd_key': 0.5},
+        {'meas_loc': 'NORTH', 'mod_loc': 'NORTH', 'd_key': 1.5}
+    ]
+    
+    out_filename = "Validation_NORTH_SingleDay_3107.png"
+    out_path = os.path.join(out_dir, out_filename)
+    
+    # Aufruf mit highlight_range Parameter
+    create_figure(
+        plot_config, 
+        d_meas_sub, 
+        d_m1_sub, 
+        d_m2_sub, 
+        out_path, 
+        date_fmt='%H:%M', 
+        y_limits=(12, 24),
+        title_suffix="(31-07-2022)",
+        highlight_range=(shadow_start, shadow_end)
+    )
+    
+    create_figure(
+        plot_config, 
+        d_meas_sub, 
+        d_m1_sub, 
+        d_m2_sub, 
+        out_path.replace('.png', '.svg'), 
+        date_fmt='%H:%M', 
+        y_limits=(12, 24),
+        title_suffix="(31-07-2022)",
+        highlight_range=(shadow_start, shadow_end)
+    )
+
 if __name__ == "__main__":
     dir_v1 = r'Y:\Danmark_Building\Danmark_Building_Validation_Long_V56\receptors'
     dir_v2 = r'Y:\Danmark_Building\Danmark_Building_Validation_Long_new\receptors'
@@ -511,11 +730,28 @@ if __name__ == "__main__":
     
     ROOF_H = 20.0
     
+    # 1. Daten laden
     d_m1 = load_envimet_receptors(dir_v1, ROOF_H, "V56", out_dir)
     d_m2 = load_envimet_receptors(dir_v2, ROOF_H, "NEW", out_dir)
     d_meas = load_measurements(meas_file, out_dir)
     
     if not d_meas.empty:
+        # Bestehende Plots ausführen (optional, falls gewünscht)
         run_plotting_split(d_meas, d_m1, d_m2, out_dir)
+
+        modes = ['day', 'night']
+        locations = ['NORTH', 'SOUTH1', 'SOUTH2', 'ROOF']
+        
+        for mode in modes:
+            print(f"\n--- Generiere Contour Plots ({mode.upper()}) ---")
+            for loc in locations:
+                filename = f'Contour_{loc}_{mode}.png'
+                create_contour_figure(d_meas, d_m1, d_m2, loc, os.path.join(out_dir, filename), mode=mode)
+
+        # Profil-Plot für 30.07.2022 um 13:00 Uhr
+        target_time = "2022-07-30 13:00:00"
+        create_profile_figure(d_meas, d_m1, d_m2, target_time, os.path.join(out_dir, 'Validation_Profile_1300.png'))
+
+        run_single_day_plot(d_meas, d_m1, d_m2, out_dir)
     else:
         print("Abbruch: Keine Messdaten.")
